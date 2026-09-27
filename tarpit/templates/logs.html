@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Log & Status – Telegram Tarpit{% endblock %}
+{% block page %}logs{% endblock %}
+{% block content %}
+<h1>Log &amp; Status</h1>
+{% include "_health.html" %}
+
+<section class="grid-2">
+  <div class="card">
+    <h2 class="flush">KI-Modell</h2>
+    <table class="kv">
+      <tr><th>API</th><td class="mono small">{{ health.llm_base_url }}</td></tr>
+      <tr><th>Modell (Antworten)</th><td class="mono small">{{ settings.model }}</td></tr>
+      <tr><th>Modell (Analyse)</th><td class="mono small">{{ settings.analysis_model or 'wie oben' }}</td></tr>
+      <tr><th>Letzter Erfolg</th><td>{{ health.llm.last_ok_at | ago }}{% if health.llm.last_latency_ms %} · {{ health.llm.last_latency_ms }} ms{% endif %}</td></tr>
+      <tr><th>Letzter Fehler</th><td>{{ health.llm.last_error_at | ago }}{% if health.llm.last_error %}<br><span class="small err">{{ health.llm.last_error }}</span>{% endif %}</td></tr>
+      <tr><th>Aufrufe heute</th><td>{{ health.llm.calls_today }} ({{ health.llm.errors_today }} fehlgeschlagen)</td></tr>
+      <tr><th>Tokens heute</th><td>{{ health.llm.prompt_tokens_today }} Eingabe (davon {{ health.llm.cached_tokens_today }} Cache) · {{ health.llm.completion_tokens_today }} Ausgabe</td></tr>
+      <tr><th>Kosten heute</th><td>{% if health.llm.cost_today %}{{ health.llm.cost_today | usd }}{% else %}– (nur bei OpenRouter){% endif %}</td></tr>
+    </table>
+    <form method="post" action="/logs/test-model" class="row">
+      <button class="btn primary">🩺 Modell testen</button>
+      <span class="muted small">schickt eine winzige Test-Anfrage (≈ 20 Token)</span>
+    </form>
+    {% if model_test %}
+      <p class="banner {{ 'ok' if model_test.ok else '' }} small">{{ '✅' if model_test.ok else '❌' }} {{ model_test.message }} <span class="muted">({{ model_test.at | tsfull }})</span></p>
+    {% endif %}
+  </div>
+  <div class="card">
+    <h2 class="flush">Telegram &amp; Steuerung</h2>
+    <table class="kv">
+      <tr><th>Verbindung</th><td>{{ '✅ verbunden' if health.telegram_connected else '❌ getrennt' }}</td></tr>
+      <tr><th>Account</th><td>{{ health.me or 'nicht angemeldet' }}</td></tr>
+      <tr><th>Geplante Antworten</th><td>{{ health.timers }}</td></tr>
+      <tr><th>Entwürfe in Arbeit</th><td>{{ health.drafting }}</td></tr>
+      <tr><th>Tippt gerade</th><td>{{ health.sending }}</td></tr>
+    </table>
+  </div>
+</section>
+
+<form method="get" action="/logs" class="row filters">
+  <select name="level" onchange="this.form.submit()" aria-label="Level">
+    {% for value, label in [('', 'Alle Einträge'), ('problems', '⚠️ Nur Probleme'), ('INFO', 'Info'), ('WARNING', 'Warnungen'), ('ERROR', 'Fehler')] %}
+      <option value="{{ value }}" {{ 'selected' if filters.level == value }}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <select name="source" onchange="this.form.submit()" aria-label="Quelle">
+    <option value="">Alle Quellen</option>
+    {% for value, label in sources.items() %}
+      <option value="{{ value }}" {{ 'selected' if filters.source == value }}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  {% if filters.chat %}<input type="hidden" name="chat" value="{{ filters.chat }}"><a class="btn small" href="/logs">Chat-Filter entfernen</a>{% endif %}
+  <label class="small"><input type="checkbox" id="log-autorefresh" checked> live aktualisieren</label>
+</form>
+
+<div class="table-wrap">
+<table class="log">
+  <thead><tr><th>Zeit</th><th>Level</th><th>Quelle</th><th>Chat</th><th>Meldung</th></tr></thead>
+  <tbody id="log-rows">{% include "_log_rows.html" %}</tbody>
+</table>
+</div>
+{% endblock %}

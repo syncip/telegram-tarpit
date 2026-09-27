@@ -1,12 +1,15 @@
-"""SQLite-Speicher für Chats, Nachrichten, Personas und Einstellungen.
+"""SQLite-Speicher für Chats, Nachrichten, Personas, Einstellungen und Log.
 
 Alle Zugriffe passieren aus dem asyncio-Event-Loop-Thread; die Abfragen sind
-winzig, deshalb reicht das synchrone sqlite3-Modul.
+winzig, deshalb reicht das synchrone sqlite3-Modul. Nur das Log kann auch aus
+anderen Threads (Logging-Handler) beschrieben werden und ist per Lock geschützt.
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
+import threading
 import time
 from datetime import date
 from pathlib import Path
@@ -51,21 +54,71 @@ CREATE TABLE IF NOT EXISTS settings (
     key    TEXT PRIMARY KEY,
     value  TEXT NOT NULL
 );
+
+-- Ereignis-Log für die Statusseite
+CREATE TABLE IF NOT EXISTS events (
+    id       INTEGER PRIMARY KEY,
+    ts       REAL NOT NULL,
+    level    TEXT NOT NULL,
+    source   TEXT NOT NULL,
+    chat_id  INTEGER,
+    message  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts);
 """
+
+# Spalten, die nach der ersten Version dazugekommen sind (werden per ALTER TABLE ergänzt)
+MIGRATIONS: dict[str, dict[str, str]] = {
+    "chats": {
+        # auto = KI antwortet selbst, review = KI schlägt vor, du gibst frei, manual = nur du
+        "mode": "TEXT NOT NULL DEFAULT 'auto'",
+        "due_at": "REAL",
+        "draft_text": "TEXT",
+        "draft_edited": "INTEGER NOT NULL DEFAULT 0",
+        "draft_basis": "INTEGER",
+        "draft_at": "REAL",
+        "instruction": "TEXT",
+        "analysis": "TEXT",
+        "analysis_at": "REAL",
+        "analysis_basis": "INTEGER",
+    },
+    "messages": {
+        "edited": "INTEGER NOT NULL DEFAULT 0",
+    },
+}
+
+MODES = ("auto", "review", "manual")
 
 DEFAULT_SETTINGS: dict[str, str] = {
     "global_enabled": "1",
     "model": "openai/gpt-4o-mini",
+    "analysis_model": "",     # leer = gleiches Modell wie für die Antworten
     "temperature": "0.9",
     "min_delay": "45",        # Sekunden
     "max_delay": "10800",     # Sekunden (3 h)
     "daily_limit": "40",      # KI-Nachrichten pro Chat und Tag
-    "history_limit": "40",    # Nachrichten Kontext für die KI
+    "history_limit": "30",    # Nachrichten Kontext für die KI
     "quiet_start": "23",      # Stunde, ab der "geschlafen" wird
     "quiet_end": "7",         # Stunde, ab der wieder geantwortet wird
+    "max_reply_tokens": "300",  # Obergrenze für die Länge einer KI-Antwort
+    "auto_analyze": "1",
+    "analyze_every": "10",     # neue Nachrichten bis zur nächsten automatischen Analyse
 }
 
-INT_SETTINGS = {"min_delay", "max_delay", "daily_limit", "history_limit", "quiet_start", "quiet_end"}
+OLD_DEFAULTS_V1 = {"history_limit": "40", "analyze_every": "6"}
+
+INT_SETTINGS = {
+    "min_delay", "max_delay", "daily_limit", "history_limit", "quiet_start", "quiet_end",
+    "analyze_every",
+}
+BOOL_SETTINGS = {"global_enabled", "auto_analyze"}
+
+CHAT_FIELDS = {
+    "enabled", "mode", "persona_id", "due_at", "draft_text", "draft_edited", "draft_basis",
+    "draft_at", "instruction", "analysis", "analysis_at", "analysis_basis",
+}
+
+MAX_EVENTS = 5000
 
 
 class Database:
@@ -75,7 +128,20 @@ class Database:
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.executescript(SCHEMA)
+        self._lock = threading.RLock()
+        self._migrate()
         self._seed()
+
+    def _migrate(self) -> None:
+        with self.conn:
+            for table, columns in MIGRATIONS.items():
+                existing = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+                for name, ddl in columns.items():
+                    if name not in existing:
+                        self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+                        if (table, name) == ("chats", "mode"):
+                            # früheres "pausiert" entspricht jetzt "nur ich"
+                            self.conn.execute("UPDATE chats SET mode = 'manual' WHERE paused = 1")
 
     def _seed(self) -> None:
         with self.conn:
@@ -83,6 +149,17 @@ class Database:
                 self.conn.execute(
                     "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value)
                 )
+            version = self.conn.execute(
+                "SELECT value FROM settings WHERE key = 'settings_version'"
+            ).fetchone()
+            if version is None:
+                # Version 2: sparsamere Standardwerte, nur wenn noch der alte Standard gesetzt ist
+                for key, old_default in OLD_DEFAULTS_V1.items():
+                    self.conn.execute(
+                        "UPDATE settings SET value = ? WHERE key = ? AND value = ?",
+                        (DEFAULT_SETTINGS[key], key, old_default),
+                    )
+                self.conn.execute("INSERT INTO settings (key, value) VALUES ('settings_version', '2')")
             if self.conn.execute("SELECT COUNT(*) FROM personas").fetchone()[0] == 0:
                 for name, prompt in DEFAULT_PERSONAS:
                     self.conn.execute(
@@ -101,8 +178,9 @@ class Database:
         result.update({r["key"]: r["value"] for r in rows})
         for key in INT_SETTINGS:
             result[key] = int(result[key])
+        for key in BOOL_SETTINGS:
+            result[key] = result[key] == "1"
         result["temperature"] = float(result["temperature"])
-        result["global_enabled"] = result["global_enabled"] == "1"
         return result
 
     def set_setting(self, key: str, value: Any) -> None:
@@ -176,6 +254,8 @@ class Database:
                    p.name AS persona_name,
                    (SELECT COUNT(*) FROM messages m
                      WHERE m.chat_id = c.chat_id AND m.sender = 'ai') AS n_ai,
+                   (SELECT COUNT(*) FROM messages m
+                     WHERE m.chat_id = c.chat_id AND m.sender = 'them') AS n_them,
                    (SELECT MIN(ts) FROM messages m
                      WHERE m.chat_id = c.chat_id AND m.sender = 'ai') AS first_ai,
                    (SELECT MAX(ts) FROM messages m
@@ -194,19 +274,33 @@ class Database:
     def enabled_chats(self) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM chats WHERE enabled = 1").fetchall()
 
-    def set_chat_flag(self, chat_id: int, field: str, value: bool) -> None:
-        if field not in ("enabled", "paused"):
-            raise ValueError(field)
+    def update_chat(self, chat_id: int, **fields: Any) -> None:
+        unknown = set(fields) - CHAT_FIELDS
+        if unknown:
+            raise ValueError(f"Unbekannte Felder: {unknown}")
+        if "mode" in fields and fields["mode"] not in MODES:
+            raise ValueError(f"Ungültiger Modus: {fields['mode']}")
+        if not fields:
+            return
+        assignments = ", ".join(f"{name} = ?" for name in fields)
+        values = [int(v) if isinstance(v, bool) else v for v in fields.values()]
         with self.conn:
             self.conn.execute(
-                f"UPDATE chats SET {field} = ? WHERE chat_id = ?", (int(value), chat_id)
+                f"UPDATE chats SET {assignments} WHERE chat_id = ?", (*values, chat_id)
             )
 
+    def set_chat_flag(self, chat_id: int, field: str, value: bool) -> None:
+        if field != "enabled":
+            raise ValueError(field)
+        self.update_chat(chat_id, enabled=value)
+
     def set_chat_persona(self, chat_id: int, persona_id: int | None) -> None:
-        with self.conn:
-            self.conn.execute(
-                "UPDATE chats SET persona_id = ? WHERE chat_id = ?", (persona_id, chat_id)
-            )
+        self.update_chat(chat_id, persona_id=persona_id)
+
+    def clear_draft(self, chat_id: int) -> None:
+        self.update_chat(
+            chat_id, draft_text=None, draft_edited=0, draft_basis=None, draft_at=None
+        )
 
     def ai_sent_today(self, chat: sqlite3.Row) -> int:
         return chat["ai_today"] if chat["ai_day"] == date.today().isoformat() else 0
@@ -224,19 +318,33 @@ class Database:
                 (today, today, chat_id),
             )
 
+    def analysis(self, chat: sqlite3.Row) -> dict | None:
+        if not chat["analysis"]:
+            return None
+        try:
+            return json.loads(chat["analysis"])
+        except ValueError:
+            return None
+
+    def analyses(self) -> list[tuple[sqlite3.Row, dict]]:
+        rows = self.conn.execute(
+            "SELECT * FROM chats WHERE analysis IS NOT NULL ORDER BY analysis_at DESC"
+        ).fetchall()
+        return [(row, a) for row in rows if (a := self.analysis(row)) is not None]
+
     # --- Nachrichten -------------------------------------------------------
 
     def add_message(
         self, chat_id: int, sender: str, text: str, ts: float | None = None,
-        tg_msg_id: int | None = None,
+        tg_msg_id: int | None = None, edited: bool = False,
     ) -> bool:
         """Speichert eine Nachricht. Gibt False zurück, wenn sie schon existiert."""
         ts = time.time() if ts is None else ts
         with self.conn:
             cur = self.conn.execute(
-                "INSERT OR IGNORE INTO messages (chat_id, tg_msg_id, sender, text, ts) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (chat_id, tg_msg_id, sender, text, ts),
+                "INSERT OR IGNORE INTO messages (chat_id, tg_msg_id, sender, text, ts, edited) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (chat_id, tg_msg_id, sender, text, ts, int(edited)),
             )
             if cur.rowcount and sender != "note":
                 self.conn.execute(
@@ -260,15 +368,124 @@ class Database:
         ).fetchall()
         return list(reversed(rows))
 
+    def messages_window(self, chat_id: int, limit: int, step: int = 10) -> list[sqlite3.Row]:
+        """Die letzten ``limit`` bis ``limit + step - 1`` Nachrichten (ohne Vermerke).
+
+        Der Beginn des Fensters springt nur in ``step``-Schritten weiter statt bei
+        jeder neuen Nachricht. So bleibt der Anfang der KI-Anfrage öfter gleich,
+        und Anbieter mit Prompt-Caching berechnen ihn günstiger.
+        """
+        total = self.message_count(chat_id)
+        start = max(0, total - limit)
+        start -= start % step
+        rows = self.conn.execute(
+            "SELECT * FROM messages WHERE chat_id = ? AND sender != 'note' "
+            "ORDER BY ts, id LIMIT -1 OFFSET ?",
+            (chat_id, start),
+        ).fetchall()
+        return list(rows)
+
     def message_count(self, chat_id: int) -> int:
         return self.conn.execute(
             "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND sender != 'note'", (chat_id,)
         ).fetchone()[0]
 
-    def last_sender(self, chat_id: int) -> str | None:
-        row = self.conn.execute(
-            "SELECT sender FROM messages WHERE chat_id = ? AND sender != 'note' "
+    def last_message(self, chat_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM messages WHERE chat_id = ? AND sender != 'note' "
             "ORDER BY ts DESC, id DESC LIMIT 1",
             (chat_id,),
         ).fetchone()
+
+    def last_sender(self, chat_id: int) -> str | None:
+        row = self.last_message(chat_id)
         return row["sender"] if row else None
+
+    def last_message_id(self, chat_id: int, include_notes: bool = False) -> int:
+        where = "" if include_notes else "AND sender != 'note'"
+        row = self.conn.execute(
+            f"SELECT MAX(id) FROM messages WHERE chat_id = ? {where}", (chat_id,)
+        ).fetchone()
+        return row[0] or 0
+
+    def messages_since(self, chat_id: int, message_id: int | None) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND sender != 'note' AND id > ?",
+            (chat_id, message_id or 0),
+        ).fetchone()[0]
+
+    def message_counts_by_day(self, since: float, chat_id: int | None = None) -> list[sqlite3.Row]:
+        where = "AND chat_id = ?" if chat_id is not None else ""
+        params: tuple = (since, chat_id) if chat_id is not None else (since,)
+        return self.conn.execute(
+            f"""
+            SELECT date(ts, 'unixepoch', 'localtime') AS day, sender, COUNT(*) AS n
+            FROM messages WHERE ts >= ? AND sender IN ('them', 'ai', 'me') {where}
+            GROUP BY day, sender
+            """,
+            params,
+        ).fetchall()
+
+    def message_counts_by_hour(self, since: float, chat_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """
+            SELECT strftime('%Y-%m-%d %H', ts, 'unixepoch', 'localtime') AS hour, sender, COUNT(*) AS n
+            FROM messages WHERE ts >= ? AND chat_id = ? AND sender IN ('them', 'ai', 'me')
+            GROUP BY hour, sender
+            """,
+            (since, chat_id),
+        ).fetchall()
+
+    def scammer_texts(self, limit: int = 20000) -> list[str]:
+        rows = self.conn.execute(
+            "SELECT m.text FROM messages m JOIN chats c ON c.chat_id = m.chat_id "
+            "WHERE m.sender = 'them' AND (c.enabled = 1 OR c.analysis IS NOT NULL) "
+            "ORDER BY m.id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [r["text"] for r in rows]
+
+    # --- Ereignis-Log ------------------------------------------------------
+
+    def add_event(
+        self, level: str, source: str, message: str, chat_id: int | None = None,
+        ts: float | None = None,
+    ) -> None:
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO events (ts, level, source, chat_id, message) VALUES (?, ?, ?, ?, ?)",
+                (ts or time.time(), level, source, chat_id, message[:4000]),
+            )
+            if cur.lastrowid % 200 == 0:
+                self.conn.execute(
+                    "DELETE FROM events WHERE id <= ?", (cur.lastrowid - MAX_EVENTS,)
+                )
+
+    def events(
+        self, limit: int = 300, level: str | None = None, source: str | None = None,
+        chat_id: int | None = None,
+    ) -> list[sqlite3.Row]:
+        conditions, params = [], []
+        if level == "problems":
+            conditions.append("level IN ('WARNING', 'ERROR', 'CRITICAL')")
+        elif level:
+            conditions.append("level = ?")
+            params.append(level)
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
+        if chat_id is not None:
+            conditions.append("chat_id = ?")
+            params.append(chat_id)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        with self._lock:
+            return self.conn.execute(
+                f"SELECT * FROM events {where} ORDER BY id DESC LIMIT ?", (*params, limit)
+            ).fetchall()
+
+    def problem_count(self, since: float) -> int:
+        with self._lock:
+            return self.conn.execute(
+                "SELECT COUNT(*) FROM events WHERE ts >= ? AND level IN ('WARNING', 'ERROR', 'CRITICAL')",
+                (since,),
+            ).fetchone()[0]

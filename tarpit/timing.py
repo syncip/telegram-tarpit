@@ -52,3 +52,29 @@ def typing_duration(text: str, rng: random.Random | None = None) -> float:
     rng = rng or random.Random()
     chars_per_second = rng.uniform(3.0, 6.0)
     return min(2.0 + len(text) / chars_per_second, 30.0)
+
+
+def typing_plan(
+    text: str, rng: random.Random | None = None, instant: bool = False
+) -> list[tuple[str, float]]:
+    """Ablauf aus ("typing", Sekunden) und ("pause", Sekunden) für eine Nachricht.
+
+    Echte Menschen tippen nicht am Stück: Sie fangen an, hören auf, überlegen,
+    tippen weiter. Genau das sieht der Scammer als "schreibt ..." an- und
+    ausgehen.
+    """
+    rng = rng or random.Random()
+    total = typing_duration(text, rng)
+    if instant:
+        return [("typing", min(total, 3.0))]
+    plan: list[tuple[str, float]] = []
+    if rng.random() < 0.15:
+        # Fehlstart: kurz tippen, abbrechen, später richtig schreiben
+        plan += [("typing", rng.uniform(2, 5)), ("pause", rng.uniform(8, 30))]
+    if total > 6 and rng.random() < 0.4:
+        # zwischendurch zögern
+        first = total * rng.uniform(0.3, 0.7)
+        plan += [("typing", first), ("pause", rng.uniform(2, 8)), ("typing", total - first)]
+    else:
+        plan.append(("typing", total))
+    return plan

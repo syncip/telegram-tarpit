@@ -1,26 +1,27 @@
 {% extends "base.html" %}
 {% block title %}{{ chat.title }} – Telegram Tarpit{% endblock %}
+{% block page %}chat{% endblock %}
+{% block main_class %}wide{% endblock %}
 {% block content %}
+<div data-chat-id="{{ chat.chat_id }}" data-last-msg-id="{{ status.last_msg_id }}">
+
 <section class="row between">
   <div>
     <h1>{{ chat.title }}</h1>
     <p class="muted">
       {% if chat.username %}@{{ chat.username }} · {% endif %}ID {{ chat.chat_id }}
-      · KI heute: {{ ai_today }}/{{ settings.daily_limit }}
+      · KI heute: {{ status.ai_today }}/{{ status.daily_limit }}
     </p>
   </div>
   <div class="actions">
-    {% for field, label_on, label_off in [('enabled', 'KI übernimmt: AN', 'KI übernimmt: aus'), ('paused', 'Pausiert', 'Pausieren')] %}
-    <form method="post" action="/chats/{{ chat.chat_id }}/toggle">
-      <input type="hidden" name="field" value="{{ field }}">
-      <input type="hidden" name="value" value="{{ '0' if chat[field] else '1' }}">
+    <form method="post" action="/chats/{{ chat.chat_id }}/enabled">
+      <input type="hidden" name="value" value="{{ '0' if chat.enabled else '1' }}">
       <input type="hidden" name="next" value="/chats/{{ chat.chat_id }}">
-      <button class="switch {{ 'on' if chat[field] else '' }}">{{ label_on if chat[field] else label_off }}</button>
+      <button class="switch {{ 'on' if chat.enabled else '' }}">{{ 'KI übernimmt: AN' if chat.enabled else 'KI übernimmt: aus' }}</button>
     </form>
-    {% endfor %}
     <form method="post" action="/chats/{{ chat.chat_id }}/persona">
       <input type="hidden" name="next" value="/chats/{{ chat.chat_id }}">
-      <select name="persona_id" onchange="this.form.submit()">
+      <select name="persona_id" onchange="this.form.submit()" aria-label="Persona">
         <option value="">Standard ({{ persona.name if persona else '–' }})</option>
         {% for p in personas %}
           <option value="{{ p.id }}" {{ 'selected' if p.id == chat.persona_id else '' }}>{{ p.name }}</option>
@@ -30,43 +31,150 @@
   </div>
 </section>
 
-<div id="messages" class="messages" data-src="/chats/{{ chat.chat_id }}/messages">
-  {% include "_messages.html" %}
+<div class="chat-layout">
+  <div class="chat-main">
+    {# --- Steuerpult ----------------------------------------------------- #}
+    {% if chat.enabled %}
+    <section class="card control">
+      <div class="segmented" role="group" aria-label="Wer antwortet?">
+        {% for value, label, hint in [('auto', '🤖 KI automatisch', 'Die KI antwortet selbst, zum geplanten Zeitpunkt'),
+                                      ('review', '👀 KI schlägt vor', 'Die KI schreibt Entwürfe, du gibst sie frei'),
+                                      ('manual', '✋ Nur ich', 'Keine KI, nur du antwortest')] %}
+        <form method="post" action="/chats/{{ chat.chat_id }}/mode">
+          <input type="hidden" name="mode" value="{{ value }}">
+          <button class="{{ 'active' if chat.mode == value }}" title="{{ hint }}">{{ label }}</button>
+        </form>
+        {% endfor %}
+      </div>
+
+      <div class="next-reply">
+        <div>
+          <div id="reply-state" class="state">…</div>
+          <div class="muted small">Nächste KI-Antwort</div>
+          <div id="next-reply" class="countdown big mono" data-due="{{ status.due_at or '' }}" data-state="{{ 'sending' if status.sending }}"></div>
+        </div>
+        {% if chat.mode != 'manual' %}
+        <form method="post" action="/chats/{{ chat.chat_id }}/reply-now">
+          <button class="btn primary big-btn" title="Entwurf ohne Wartezeit senden (wird bei Bedarf vorher erzeugt)">⚡ Sofort antworten</button>
+        </form>
+        {% endif %}
+      </div>
+
+      {% if chat.mode != 'manual' %}
+      <div class="draft">
+        <div class="row between">
+          <strong>Das wird die KI antworten:</strong>
+          <span>
+            <span id="draft-generating" class="chip busy" {{ 'hidden' if not status.generating }}>✍️ wird erzeugt …</span>
+            <span id="draft-edited" class="chip" {{ 'hidden' if not status.draft_edited }}>✏️ von dir bearbeitet</span>
+          </span>
+        </div>
+        <p id="draft-stale" class="banner small" {{ 'hidden' if not (status.draft_text and status.draft_stale) }}>
+          Seit diesem Entwurf kam eine neue Nachricht.
+          {% if status.draft_edited %}Dein bearbeiteter Text wird trotzdem so gesendet.{% else %}Er wird vor dem Senden automatisch neu erzeugt.{% endif %}
+        </p>
+        <form method="post" action="/chats/{{ chat.chat_id }}/draft" class="stack">
+          <textarea id="draft-text" name="text" rows="4" placeholder="Noch kein Entwurf. Er entsteht, sobald der Scammer schreibt, oder per „Neu generieren“.">{{ status.draft_text or '' }}</textarea>
+          <p class="muted small">Tipp: Mehrere Nachrichten mit einer Zeile <code>---</code> trennen. <code>[SKIP]</code> heißt: bewusst nicht antworten.</p>
+          <div class="row">
+            <button class="btn" name="action" value="save">💾 Speichern</button>
+            <button class="btn primary" name="action" value="send">⚡ Speichern &amp; sofort senden</button>
+          </div>
+        </form>
+        <div class="row">
+          <form method="post" action="/chats/{{ chat.chat_id }}/draft/regenerate" class="row grow">
+            <input type="text" name="instruction" class="grow" value="{{ status.instruction or '' }}"
+                   placeholder="Regieanweisung (optional), z. B. „frag nach seinem Hund“ oder „tu so, als hättest du die App gelöscht“">
+            <button class="btn">🔄 Neu generieren</button>
+          </form>
+          <form method="post" action="/chats/{{ chat.chat_id }}/draft/discard" data-show-if-draft {{ 'hidden' if not status.draft_text }}>
+            <button class="btn danger" title="Entwurf löschen, diesmal nicht antworten">🗑 Verwerfen</button>
+          </form>
+        </div>
+      </div>
+      {% endif %}
+    </section>
+    {% endif %}
+
+    {# --- Verlauf --------------------------------------------------------- #}
+    <div id="messages" class="messages">
+      {% include "_messages.html" %}
+    </div>
+
+    <section class="card">
+      <form method="post" action="/chats/{{ chat.chat_id }}/send" class="row">
+        <input type="text" name="text" placeholder="✋ Selbst antworten, nur du, ohne KI …" class="grow" autocomplete="off">
+        <button class="btn">Selbst senden</button>
+      </form>
+      <p class="muted small">Schreibst du selbst, verwirft die KI ihren Entwurf und die geplante Antwort für diese Nachricht.</p>
+      <form method="post" action="/chats/{{ chat.chat_id }}/import">
+        <button class="btn small" title="Letzte 50 Nachrichten aus Telegram laden">Verlauf aus Telegram nachladen</button>
+      </form>
+    </section>
+  </div>
+
+  {# --- Seitenleiste: Lage, Zahlen, Grafik, Log ------------------------------ #}
+  <aside class="chat-side">
+    <section class="card">
+      <div class="row between">
+        <h2 class="flush">🧭 Lage</h2>
+        <form method="post" action="/chats/{{ chat.chat_id }}/analyze">
+          <button class="btn small" title="Analyse jetzt neu erstellen (kostet einen KI-Aufruf)">🔄 Analysieren</button>
+        </form>
+      </div>
+      {% if analysis %}
+        <p><span class="chip">{{ analysis.scam_type }}</span> <strong class="small">Phase {{ analysis.stage }}: {{ stages[analysis.stage - 1] }}</strong> <span class="muted small">· Stand {{ chat.analysis_at | ago }}</span></p>
+        <ol class="stages">
+          {% for name in stages_short %}
+          <li class="{{ 'done' if loop.index < analysis.stage else ('current' if loop.index == analysis.stage else '') }}" data-tip="Phase {{ loop.index }}: {{ stages[loop.index0] }}">{{ name }}</li>
+          {% endfor %}
+        </ol>
+        <p>{{ analysis.summary }}</p>
+        {% if analysis.scammer_goal %}<p class="small"><strong>🎣 Scammer will:</strong> {{ analysis.scammer_goal }}</p>{% endif %}
+        {% if analysis.bait_tactic %}<p class="small"><strong>🤖 KI hält hin mit:</strong> {{ analysis.bait_tactic }}</p>{% endif %}
+        <div class="meter-row" data-tip="Wie genervt wirkt der Scammer? {{ analysis.frustration }} von 10">
+          <span class="small">Frust-Level</span>
+          <div class="meter"><div class="meter-fill" style="width: {{ analysis.frustration * 10 }}%"></div></div>
+          <span class="small mono">{{ analysis.frustration }}/10</span>
+        </div>
+        {% if analysis.keywords %}
+        <p class="small"><strong>Schlagworte:</strong><br>
+          {% for kw in analysis.keywords %}<span class="chip">{{ kw }}</span> {% endfor %}
+        </p>
+        {% endif %}
+        {% if analysis.best_of %}
+        <h3>⭐ Best-of</h3>
+        {% for q in analysis.best_of %}
+          <blockquote class="quote {{ q.sender }}">{{ q.text }}<footer>{{ '🎣 Scammer' if q.sender == 'them' else '🤖 Köder' }}</footer></blockquote>
+        {% endfor %}
+        {% endif %}
+      {% else %}
+        <p class="muted">Noch keine Analyse. Sie entsteht automatisch alle {{ settings.analyze_every }} Nachrichten{% if not settings.auto_analyze %} (derzeit ausgeschaltet){% endif %}, oder per Knopf.</p>
+      {% endif %}
+    </section>
+
+    <section class="card">
+      <div class="stats compact">
+        <div class="stat"><span>{{ row.n_them if row else 0 }}</span>Scammer-Msgs</div>
+        <div class="stat"><span>{{ row.n_ai if row else 0 }}</span>KI-Msgs</div>
+        <div class="stat"><span>{{ wasted | duration }}</span>gebunden</div>
+        <div class="stat" data-tip="Wie schnell der Scammer im Schnitt auf den Köder antwortet"><span>{{ times.scammer | duration }}</span>Ø Scammer antwortet</div>
+        <div class="stat" data-tip="Wie lange der Köder (KI oder du) im Schnitt wartet"><span>{{ times.bait | duration }}</span>Ø Köder antwortet</div>
+      </div>
+      {{ chart | safe }}
+    </section>
+
+    <section class="card">
+      <div class="row between"><h2 class="flush">📋 Log</h2><a class="small" href="/logs?chat={{ chat.chat_id }}">alles</a></div>
+      <ul class="mini-log">
+        {% for e in events %}
+          <li class="lvl-{{ e.level | lower }}"><span class="mono muted">{{ e.ts | tsfull }}</span> {{ e.message }}</li>
+        {% else %}
+          <li class="muted">Noch keine Einträge.</li>
+        {% endfor %}
+      </ul>
+    </section>
+  </aside>
 </div>
-
-<section class="row controls">
-  <form method="post" action="/chats/{{ chat.chat_id }}/send" class="grow row">
-    <input type="text" name="text" placeholder="Selbst eine Nachricht schicken…" class="grow" autocomplete="off">
-    <button class="btn">Senden</button>
-  </form>
-  <form method="post" action="/chats/{{ chat.chat_id }}/reply-now">
-    <button class="btn primary" title="KI antwortet sofort, ohne Verzögerung">🤖 Jetzt antworten</button>
-  </form>
-  {% if pending %}
-  <form method="post" action="/chats/{{ chat.chat_id }}/cancel">
-    <button class="btn">Geplante Antwort verwerfen</button>
-  </form>
-  {% endif %}
-  <form method="post" action="/chats/{{ chat.chat_id }}/import">
-    <button class="btn" title="Letzte 50 Nachrichten aus Telegram laden">Verlauf laden</button>
-  </form>
-</section>
-
-<script>
-  // Verlauf alle 5 Sekunden neu laden
-  (function () {
-    const box = document.getElementById("messages");
-    const atBottom = () => box.scrollHeight - box.scrollTop - box.clientHeight < 40;
-    box.scrollTop = box.scrollHeight;
-    setInterval(async () => {
-      try {
-        const stick = atBottom();
-        const res = await fetch(box.dataset.src, { credentials: "same-origin" });
-        if (!res.ok) return;
-        box.innerHTML = await res.text();
-        if (stick) box.scrollTop = box.scrollHeight;
-      } catch (e) { /* offline, nächster Versuch */ }
-    }, 5000);
-  })();
-</script>
+</div>
 {% endblock %}

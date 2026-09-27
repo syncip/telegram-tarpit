@@ -1,13 +1,10 @@
 {% for m in messages %}
-  <div class="msg {{ m.sender }}">
-    <div class="bubble">{{ m.text }}</div>
+  <div class="msg {{ m.sender }}{{ ' best' if m.id in best_of else '' }}">
+    <div class="bubble">{% if m.id in best_of %}<span class="star" data-tip="Im Best-of dieser Unterhaltung">⭐</span> {% endif %}{{ m.text }}</div>
     <div class="meta">
-      {{ {'them': 'Gegenüber', 'ai': '🤖 KI', 'me': 'Du', 'note': 'ℹ️ Vermerk'}[m.sender] }} · {{ m.ts | ts }}
+      {{ {'them': '🎣 Scammer', 'ai': '🤖 KI', 'me': '🙋 Du', 'note': 'ℹ️ Vermerk'}[m.sender] }}{% if m.edited %} · ✏️ von dir bearbeitet{% endif %} · {{ m.ts | tsfull }}
     </div>
   </div>
 {% else %}
   <p class="muted">Noch keine Nachrichten.</p>
 {% endfor %}
-{% if pending %}
-  <div class="msg note"><div class="bubble">⏳ Nächste KI-Antwort geplant für {{ pending.due | ts }}</div></div>
-{% endif %}

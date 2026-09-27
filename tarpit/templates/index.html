@@ -1,10 +1,13 @@
 {% extends "base.html" %}
+{% block page %}index{% endblock %}
 {% block content %}
+{% include "_health.html" %}
+
 <section class="row between">
   <div class="stats">
     <div class="stat"><span>{{ totals.active }}</span>Chats unter KI-Kontrolle</div>
     <div class="stat"><span>{{ totals.ai_msgs }}</span>KI-Nachrichten gesendet</div>
-    <div class="stat"><span>{{ totals.baited }}</span>Nachrichten von Scammern seitdem</div>
+    <div class="stat"><span>{{ totals.baited }}</span>Scammer-Nachrichten seitdem</div>
     <div class="stat"><span>{{ totals.wasted | duration }}</span>Scammer-Zeit gebunden</div>
   </div>
   <div class="actions">
@@ -17,45 +20,51 @@
         <button class="btn primary">▶ KI global aktivieren</button>
       {% endif %}
     </form>
-    <form method="post" action="/sync">
-      <button class="btn">⟳ Chats aktualisieren</button>
-    </form>
+    <form method="post" action="/sync"><button class="btn">⟳ Chats aktualisieren</button></form>
   </div>
 </section>
 
 {% if not settings.global_enabled %}
-<p class="banner">Die KI ist global deaktiviert. Es werden keine Antworten gesendet.</p>
+<p class="banner">Die KI ist global gestoppt. Es werden keine Antworten gesendet.</p>
 {% endif %}
 
+<div class="table-wrap">
 <table class="chats">
   <thead>
-    <tr>
-      <th>Chat</th><th>KI</th><th>Persona</th><th>Letzte Nachricht</th>
-      <th>KI-Msgs</th><th>Gebunden</th><th>Nächste Antwort</th>
-    </tr>
+    <tr><th>Chat</th><th>KI</th><th>Modus</th><th>Persona</th><th>Nächste Antwort</th><th>KI-Msgs</th><th>Gebunden</th></tr>
   </thead>
   <tbody>
   {% for c in chats %}
-    <tr class="{{ 'active' if c.enabled else '' }}">
+    {% set a = analyses.get(c.chat_id) %}
+    <tr class="{{ 'active' if c.enabled else '' }}" data-chat-row="{{ c.chat_id }}">
       <td>
         <a href="/chats/{{ c.chat_id }}"><strong>{{ c.title }}</strong></a>
-        {% if c.username %}<div class="muted">@{{ c.username }}</div>{% endif %}
+        {% if c.username %}<span class="muted small">@{{ c.username }}</span>{% endif %}
+        {% if a %}<div class="small"><span class="chip">{{ a.scam_type }}</span> <span class="muted">Phase {{ a.stage }}: {{ stages[a.stage - 1] }}</span></div>{% endif %}
       </td>
       <td>
-        <form method="post" action="/chats/{{ c.chat_id }}/toggle">
-          <input type="hidden" name="field" value="enabled">
+        <form method="post" action="/chats/{{ c.chat_id }}/enabled">
           <input type="hidden" name="value" value="{{ '0' if c.enabled else '1' }}">
           <input type="hidden" name="next" value="/">
-          <button class="switch {{ 'on' if c.enabled else '' }}" title="KI übernimmt diesen Chat">
-            {{ 'AN' if c.enabled else 'aus' }}
-          </button>
+          <button class="switch {{ 'on' if c.enabled else '' }}" title="KI übernimmt diesen Chat">{{ 'AN' if c.enabled else 'aus' }}</button>
         </form>
-        {% if c.paused %}<div class="muted">pausiert</div>{% endif %}
+      </td>
+      <td>
+        {% if c.enabled %}
+        <form method="post" action="/chats/{{ c.chat_id }}/mode">
+          <input type="hidden" name="next" value="/">
+          <select name="mode" onchange="this.form.submit()" aria-label="Modus">
+            <option value="auto" {{ 'selected' if c.mode == 'auto' }}>🤖 Automatisch</option>
+            <option value="review" {{ 'selected' if c.mode == 'review' }}>👀 Freigabe</option>
+            <option value="manual" {{ 'selected' if c.mode == 'manual' }}>✋ Nur ich</option>
+          </select>
+        </form>
+        {% else %}<span class="muted">–</span>{% endif %}
       </td>
       <td>
         <form method="post" action="/chats/{{ c.chat_id }}/persona">
           <input type="hidden" name="next" value="/">
-          <select name="persona_id" onchange="this.form.submit()">
+          <select name="persona_id" onchange="this.form.submit()" aria-label="Persona">
             <option value="">Standard</option>
             {% for p in personas %}
               <option value="{{ p.id }}" {{ 'selected' if p.id == c.persona_id else '' }}>{{ p.name }}</option>
@@ -63,16 +72,53 @@
           </select>
         </form>
       </td>
-      <td>{{ c.last_message_at | ts }}</td>
+      <td class="nowrap">
+        {% if c.enabled %}
+          <span class="countdown mono" data-due="{{ c.due_at or '' }}" data-state="{{ 'sending' if c.chat_id in sending else '' }}"
+                data-empty="{{ '–' }}" data-empty-default="–"></span>
+          {% if c.mode != 'manual' %}
+          <form method="post" action="/chats/{{ c.chat_id }}/reply-now" class="inline">
+            <input type="hidden" name="next" value="/">
+            <button class="btn small" title="Sofort antworten">⚡</button>
+          </form>
+          {% endif %}
+        {% else %}<span class="muted">–</span>{% endif %}
+      </td>
       <td>{{ c.n_ai }}</td>
       <td>{{ ((c.last_them - c.first_ai) if c.first_ai and c.last_them else 0) | duration }}</td>
-      <td>{% if c.chat_id in pending %}{{ pending[c.chat_id].due | ts }}{% else %}–{% endif %}</td>
     </tr>
   {% else %}
     <tr><td colspan="7" class="muted">Noch keine Chats. Klick auf „Chats aktualisieren“.</td></tr>
   {% endfor %}
   </tbody>
 </table>
+</div>
+
+<section class="grid-2">
+  <div class="card">{{ chart_activity | safe }}</div>
+  <div class="card">{{ chart_wasted | safe }}</div>
+</section>
+
+<h2>🏆 Best-of</h2>
+<section class="grid-2">
+  <div class="card">
+    <figure class="viz"><figcaption>Schlagworte der Scammer (aus den KI-Analysen)</figcaption>{{ cloud | safe }}</figure>
+    {{ chart_lexicon | safe }}
+  </div>
+  <div class="card">
+    <figure class="viz"><figcaption>Hall of Fame: die besten Zitate</figcaption>
+    {% for item in hall_of_fame %}
+      <blockquote class="quote {{ item.quote.sender }}">
+        {{ item.quote.text }}
+        <footer>{{ '🎣 Scammer' if item.quote.sender == 'them' else '🤖 Köder' }} · <a href="/chats/{{ item.chat.chat_id }}">{{ item.chat.title }}</a></footer>
+      </blockquote>
+    {% else %}
+      <p class="muted">Noch keine Zitate. Die KI-Analyse sammelt sie automatisch.</p>
+    {% endfor %}
+    </figure>
+  </div>
+</section>
+
 {% if me %}
 <form method="post" action="/logout" class="row small muted" onsubmit="return confirm('Telegram-Session wirklich abmelden?')">
   Angemeldet als {{ me.first_name }}{% if me.username %} (@{{ me.username }}){% endif %}

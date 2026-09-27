@@ -1,53 +1,20 @@
-"""Antwort-Ablauf der Engine mit gefälschtem Telegram-Client und LLM."""
+"""Ablauf der Engine mit nachgebautem Telegram-Client und LLM."""
 
 import asyncio
-import contextlib
+import time
 from types import SimpleNamespace
 
 import pytest
+from telethon.tl.types.auth import LoginTokenSuccess
 
 from tarpit import engine as engine_mod
 from tarpit.config import Config
 from tarpit.db import Database
 from tarpit.engine import Tarpit
 
+from .fakes import ME, FakeClient, FakeLLM
 
-class FakeClient:
-    def __init__(self):
-        self.sent = []
-        self.read = []
-        self.logged_in_user = None
-        self.on_login_calls = 0
-
-    async def get_me(self):
-        return self.logged_in_user
-
-    async def _on_login(self, user):
-        self.on_login_calls += 1
-
-    async def send_read_acknowledge(self, chat_id):
-        self.read.append(chat_id)
-
-    @contextlib.asynccontextmanager
-    async def action(self, chat_id, kind):
-        yield
-
-    async def send_message(self, chat_id, text):
-        self.sent.append((chat_id, text))
-        return SimpleNamespace(id=1000 + len(self.sent))
-
-
-class FakeLLM:
-    def __init__(self, replies):
-        self.replies = list(replies)
-        self.calls = 0
-
-    async def chat(self, model, messages, temperature):
-        self.calls += 1
-        return self.replies.pop(0)
-
-    async def aclose(self):
-        pass
+CHAT = 7
 
 
 @pytest.fixture
@@ -58,62 +25,220 @@ def setup(tmp_path, monkeypatch):
     db = Database(tmp_path / "t.db")
     t = Tarpit(config, db)
     t.client = FakeClient()
-    db.upsert_chat(7, "Scam", None)
-    db.set_chat_flag(7, "enabled", True)
-    db.add_message(7, "them", "hallo, willst du reich werden?", tg_msg_id=1)
+    t.llm = FakeLLM()
+    db.upsert_chat(CHAT, "Scam", None)
+    db.update_chat(CHAT, enabled=True)
     return t, db
 
 
-def run(t, replies):
-    t.llm = FakeLLM(replies)
+def run(coro_fn):
+    """Führt eine Aktion aus und wartet, bis alle Hintergrund-Aufgaben fertig sind."""
 
     async def go():
-        t.maybe_schedule(7)
-        while t.pending:
-            await asyncio.gather(*(p.task for p in list(t.pending.values())))
+        result = coro_fn()
+        if asyncio.iscoroutine(result):
+            await result
+        for _ in range(50):
+            await asyncio.sleep(0)
+            tasks = [x for d in (t_ref.timers, t_ref.drafting, t_ref.analyzing) for x in d.values() if not x.done()]
+            if not tasks:
+                break
+            await asyncio.wait(tasks)
 
     asyncio.run(go())
 
 
-def test_sends_split_reply(setup):
+t_ref = None
+
+
+@pytest.fixture(autouse=True)
+def _remember(request):
+    global t_ref
+    if "setup" in request.fixturenames:
+        t_ref = request.getfixturevalue("setup")[0]
+    yield
+
+
+def scammer_writes(t, db, text="hallo, willst du reich werden?", tg_id=None):
+    db.add_message(CHAT, "them", text, tg_msg_id=tg_id)
+    t.on_scammer_message(CHAT)
+
+
+def sent_texts(t):
+    return [text for _, text in t.client.sent]
+
+
+def test_auto_mode_drafts_schedules_and_sends(setup):
     t, db = setup
-    run(t, ["oh ja gerne\n---\nwie geht das denn"])
-    assert [text for _, text in t.client.sent] == ["oh ja gerne", "wie geht das denn"]
-    assert db.last_sender(7) == "ai"
-    assert db.ai_sent_today(db.chat(7)) == 2
+    run(lambda: scammer_writes(t, db))
+    assert sent_texts(t) == ["ach herrje, wie geht das denn?"]
+    chat = db.chat(CHAT)
+    assert chat["due_at"] is None and chat["draft_text"] is None
+    assert db.last_sender(CHAT) == "ai"
+    assert t.client.typing >= 1 and t.client.read == [CHAT]
+    assert len(t.client.status_updates) == 2  # online beim Tippen, danach offline
+
+
+def test_due_at_is_planned_and_kept(setup, monkeypatch):
+    t, db = setup
+    # Timer nicht feuern lassen: nur Planung prüfen
+    monkeypatch.setattr(t, "_start_timer", lambda *a, **k: None)
+    db.set_setting("min_delay", 3600)
+    db.set_setting("max_delay", 7200)
+    db.set_setting("quiet_start", 0)
+    db.set_setting("quiet_end", 0)
+
+    async def go():
+        scammer_writes(t, db)
+        due = db.chat(CHAT)["due_at"]
+        assert due and due > time.time()
+        t.timers[CHAT] = SimpleNamespace(cancel=lambda: None, done=lambda: False)
+        db.add_message(CHAT, "them", "hallo??")
+        t.on_scammer_message(CHAT)  # weitere Nachricht verschiebt den Termin nicht
+        assert db.chat(CHAT)["due_at"] == due
+        # Im Automatikmodus entsteht der Entwurf erst kurz vor dem Senden
+        assert t._draft_delay(CHAT) > 60
+        for task in t.drafting.values():
+            task.cancel()
+        t.timers.clear()
+
+    asyncio.run(go())
+
+
+def test_split_reply(setup):
+    t, db = setup
+    t.llm = FakeLLM(["oh ja gerne\n---\nwie geht das denn"])
+    run(lambda: scammer_writes(t, db))
+    assert sent_texts(t) == ["oh ja gerne", "wie geht das denn"]
+    assert db.ai_sent_today(db.chat(CHAT)) == 2
 
 
 def test_blocked_reply_is_retried_then_dropped(setup):
     t, db = setup
-    run(t, ["meine nummer ist 0171 2345678 90", "als KI darf ich das nicht"])
+    t.llm = FakeLLM(["meine nummer ist 0171 2345678 90", "als KI darf ich das nicht"])
+    run(lambda: scammer_writes(t, db))
     assert t.client.sent == []
-    notes = [m["text"] for m in db.messages(7) if m["sender"] == "note"]
+    notes = [m["text"] for m in db.messages(CHAT) if m["sender"] == "note"]
     assert len(notes) == 2 and all(n.startswith("Blockiert") for n in notes)
+    assert db.chat(CHAT)["due_at"] is None
+    assert len(t.llm.reply_calls) == 2  # kein weiterer automatischer Versuch
+    run(lambda: t.reply_now(CHAT))  # per Knopf: neuer Versuch
+    assert sent_texts(t) == ["ach herrje, wie geht das denn?"]
 
 
 def test_skip(setup):
     t, db = setup
-    run(t, ["[SKIP]"])
+    t.llm = FakeLLM(["[SKIP]"])
+    run(lambda: scammer_writes(t, db))
     assert t.client.sent == []
-    assert db.last_sender(7) == "them"
+    assert db.last_sender(CHAT) == "them"
+    assert db.chat(CHAT)["draft_text"] is None
 
 
-def test_daily_limit(setup):
+def test_daily_limit_blocks_automatic_but_not_instant(setup):
     t, db = setup
     db.set_setting("daily_limit", 0)
-    run(t, ["egal"])
-    assert t.client.sent == [] and t.llm.calls == 0
+    run(lambda: scammer_writes(t, db))
+    assert t.client.sent == []
+    run(lambda: t.reply_now(CHAT))  # bewusst per Knopf: geht trotzdem
+    assert len(t.client.sent) == 1
 
 
-def test_no_reply_when_disabled_or_last_message_is_ours(setup):
+def test_review_mode_only_drafts(setup):
     t, db = setup
-    db.set_chat_flag(7, "paused", True)
-    run(t, ["x"])
-    assert t.llm.calls == 0
-    db.set_chat_flag(7, "paused", False)
-    db.add_message(7, "me", "hab selbst geantwortet")
-    run(t, ["x"])
-    assert t.llm.calls == 0
+    t.set_mode(CHAT, "review")
+    run(lambda: scammer_writes(t, db))
+    chat = db.chat(CHAT)
+    assert t.client.sent == [] and chat["due_at"] is None
+    assert chat["draft_text"] == "ach herrje, wie geht das denn?"
+    run(lambda: t.reply_now(CHAT))
+    assert sent_texts(t) == ["ach herrje, wie geht das denn?"]
+    assert len(t.llm.reply_calls) == 1  # Entwurf wurde wiederverwendet
+
+
+def test_manual_mode_does_nothing(setup):
+    t, db = setup
+    t.set_mode(CHAT, "manual")
+    run(lambda: scammer_writes(t, db))
+    assert t.client.sent == [] and t.llm.reply_calls == []
+    assert db.chat(CHAT)["draft_text"] is None
+
+
+def test_edited_draft_is_sent_as_is(setup):
+    t, db = setup
+    t.set_mode(CHAT, "review")
+    run(lambda: scammer_writes(t, db))
+    t.save_draft(CHAT, "moment, mein enkel kommt gleich")
+    db.add_message(CHAT, "them", "hallo???")  # neue Nachricht nach der Bearbeitung
+    run(lambda: t.on_scammer_message(CHAT))
+    assert db.chat(CHAT)["draft_text"] == "moment, mein enkel kommt gleich"  # nicht überschrieben
+    run(lambda: t.reply_now(CHAT))
+    assert sent_texts(t) == ["moment, mein enkel kommt gleich"]
+    assert db.messages(CHAT)[-1]["edited"] == 1
+
+
+def test_stale_draft_is_regenerated_before_sending(setup):
+    t, db = setup
+    t.set_mode(CHAT, "review")
+    t.llm = FakeLLM(["alter entwurf", "neuer entwurf"])
+    run(lambda: scammer_writes(t, db))
+    db.add_message(CHAT, "them", "und?")
+    run(lambda: t.reply_now(CHAT))
+    assert sent_texts(t) == ["neuer entwurf"]
+
+
+def test_instruction_goes_into_prompt_and_is_cleared(setup):
+    t, db = setup
+    t.set_mode(CHAT, "review")
+    db.add_message(CHAT, "them", "hallo")
+    run(lambda: t.regenerate_draft(CHAT, "frag nach seinem Hund"))
+    last_call = t.llm.reply_calls[-1]
+    assert "frag nach seinem Hund" in last_call[-1]["content"]
+    assert "frag nach seinem Hund" not in last_call[0]["content"]  # System-Prompt bleibt gleich (Cache)
+    assert db.chat(CHAT)["instruction"] == "frag nach seinem Hund"
+    run(lambda: t.reply_now(CHAT))
+    assert db.chat(CHAT)["instruction"] is None
+
+
+def test_send_manual_discards_draft_and_schedule(setup):
+    t, db = setup
+    t.set_mode(CHAT, "review")
+    run(lambda: scammer_writes(t, db))
+    run(lambda: t.send_manual(CHAT, "bin gleich wieder da"))
+    chat = db.chat(CHAT)
+    assert chat["draft_text"] is None and chat["due_at"] is None
+    assert db.last_sender(CHAT) == "me"
+
+
+def test_disable_chat_cancels_everything(setup):
+    t, db = setup
+    t.set_mode(CHAT, "review")
+    run(lambda: scammer_writes(t, db))
+    t.set_enabled(CHAT, False)
+    assert db.chat(CHAT)["draft_text"] is None
+
+
+def test_analysis_runs_after_enough_messages(setup):
+    t, db = setup
+    t.set_mode(CHAT, "manual")
+    db.set_setting("analyze_every", 3)
+    for i in range(3):
+        db.add_message(CHAT, "them", f"nachricht {i}")
+    db.update_chat(CHAT, mode="review")
+    run(lambda: t.on_scammer_message(CHAT))
+    analysis = db.analysis(db.chat(CHAT))
+    assert analysis["scam_type"] == "Krypto-Investment" and analysis["stage"] == 3
+    assert analysis["best_of"][0]["sender"] == "them"
+
+
+def test_chat_status_and_health(setup):
+    t, db = setup
+    t.set_mode(CHAT, "review")
+    run(lambda: scammer_writes(t, db))
+    status = t.chat_status(CHAT)
+    assert status["mode"] == "review" and status["draft_text"] and not status["draft_stale"]
+    health = t.health()
+    assert health["llm_healthy"] is True and health["llm"].cached_tokens_today == 300
 
 
 def test_describe_code_type():
@@ -126,8 +251,7 @@ def test_describe_code_type():
     )
 
 
-from telethon.tl.types.auth import LoginTokenSuccess  # noqa: E402
-
+# --- QR-Login -------------------------------------------------------------------
 
 class FakeQR:
     def __init__(self, outcomes, accept_on_recreate=False):
@@ -147,9 +271,6 @@ class FakeQR:
         self.recreated += 1
         if self.accept_on_recreate:
             self._resp = LoginTokenSuccess(authorization=SimpleNamespace(user=ME))
-
-
-ME = SimpleNamespace(id=1, first_name="Ich", last_name=None, username="ich")
 
 
 @pytest.fixture
@@ -178,7 +299,7 @@ def test_qr_scanned_while_token_renewed(qr_setup):
     t._qr = FakeQR([asyncio.TimeoutError()], accept_on_recreate=True)
     asyncio.run(t._qr_loop())
     assert t.qr_state == "done" and logins == [ME]
-    assert t.client.on_login_calls == 1  # Update-Zustand wurde initialisiert
+    assert t.client.on_login_calls == 1
 
 
 def test_qr_loop_needs_password(qr_setup):
@@ -212,3 +333,31 @@ def test_refresh_login_picks_up_existing_session(qr_setup):
     t.client.logged_in_user = ME
     asyncio.run(t.refresh_login())
     assert logins == [ME] and t.authorized
+
+
+def test_reply_now_does_not_wait_for_later_draft(tmp_path):
+    """Regression: Sofort-Antwort wartete auf einen Entwurf, der erst Stunden später starten sollte."""
+    config = Config(1, "h", "", "http://x", "a", "b", tmp_path, "127.0.0.1", 8080)
+    db = Database(tmp_path / "t.db")
+    t = Tarpit(config, db)
+    t.client, t.llm = FakeClient(), FakeLLM()
+    db.upsert_chat(CHAT, "Scam", None)
+    db.update_chat(CHAT, enabled=True)
+    db.set_setting("min_delay", 7200)
+    db.set_setting("max_delay", 7200)
+    db.set_setting("quiet_start", 0)
+    db.set_setting("quiet_end", 0)
+    engine_mod_typing = engine_mod.typing_plan
+    engine_mod.typing_plan = lambda text, rng=None, instant=False: [("typing", 0.01)]
+    try:
+        async def go():
+            db.add_message(CHAT, "them", "hallo")
+            t.on_scammer_message(CHAT)
+            assert t._draft_start[CHAT] > time.time() + 3600  # Entwurf erst kurz vor dem Termin
+            t.reply_now(CHAT)
+            await asyncio.wait_for(t.timers[CHAT], timeout=5)
+
+        asyncio.run(go())
+    finally:
+        engine_mod.typing_plan = engine_mod_typing
+    assert sent_texts(t) == ["ach herrje, wie geht das denn?"]

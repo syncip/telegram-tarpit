@@ -59,25 +59,66 @@ Telegram-Login**, also nicht weitergeben und nicht committen (steht bereits in `
 
 1. **Chats aktualisieren:** Die Chatliste wird aus Telegram gelesen.
 2. Beim Scammer-Chat **KI: AN** klicken und optional eine Persona wählen. Die letzten 50 Nachrichten werden als Kontext geladen.
-3. Ab jetzt antwortet die KI mit Verzögerung auf jede neue Nachricht. Im Chat-Fenster kannst du
-   - live mitlesen (blockierte Antworten und Hinweise erscheinen gelb),
-   - mit **Jetzt antworten** die Verzögerung überspringen,
-   - selbst schreiben (die geplante KI-Antwort wird dann verworfen),
-   - den Chat pausieren.
+3. Pro Chat einen **Modus** wählen:
+   - 🤖 **KI automatisch:** Die KI antwortet selbst, mit zufälliger Verzögerung (Tarpit).
+   - 👀 **KI schlägt vor:** Die KI schreibt einen Entwurf, gesendet wird erst, wenn du freigibst.
+   - ✋ **Nur ich:** keine KI, nur du antwortest.
 4. **Alles stoppen** in der Übersicht ist der Not-Aus.
 
+### Chat-Ansicht
+
+- **Countdown bis zur nächsten KI-Antwort**, sekundengenau, dazu ⚡ **Sofort antworten**.
+- **„Das wird die KI antworten“:** Der Entwurf ist sichtbar und editierbar.
+  - 💾 Speichern: Dein Text wird so gesendet, auch wenn danach noch Nachrichten kommen.
+  - 🔄 Neu generieren, optional mit **Regieanweisung** (z. B. „frag nach seinem Hund“).
+  - 🗑 Verwerfen: diesmal nicht antworten.
+- **Selbst antworten:** Deine Nachricht geht raus, der KI-Entwurf entfällt.
+- **🧭 Lage:** KI-Analyse mit Masche, Phase (Erstkontakt → Aufgegeben), Kurzzusammenfassung, was der Scammer will, womit
+  die KI hinhält, Frust-Level, Schlagworte und **⭐ Best-of-Zitaten** (im Verlauf markiert).
+- Zahlen und Grafik: Nachrichten pro Stunde/Tag, gebundene Zeit, Ø Antwortzeiten.
+
 Schreibst du selbst vom Handy in einen KI-Chat, merkt das die App: Die Nachricht landet im Kontext, und die
-KI antwortet erst wieder, wenn der Scammer schreibt.
+KI verwirft ihre geplante Antwort.
+
+Beim Antworten sieht der Scammer „… schreibt“ mit realistischem Zögern (tippt, hört auf, tippt weiter,
+gelegentlich ein Fehlstart), dein Account erscheint dabei kurz „online“ und liest die Nachricht erst kurz vorher.
+
+### Übersicht & Best-of
+
+Statusleiste (Telegram, KI-Modell, Probleme, Token/Kosten heute), Chatliste mit Live-Countdown und ⚡-Knopf,
+Grafiken (Nachrichten pro Tag, gebundene Scammer-Zeit), Schlagwort-Wolke, Scam-Vokabular und Hall of Fame.
+
+### Log & Status
+
+Unter **Log & Status** siehst du, ob alles läuft: Telegram-Verbindung, Erreichbarkeit des Modells (letzter
+Erfolg/Fehler, Antwortzeit), Tokens und Kosten, dazu ein Ereignis-Log mit Filtern (nur Probleme, nach Quelle,
+nach Chat). **🩺 Modell testen** schickt eine winzige Test-Anfrage.
 
 ### Einstellungen
 
 | Einstellung | Standard | Bedeutung |
 |---|---|---|
 | Modell | `openai/gpt-4o-mini` | Modell-ID bei OpenRouter bzw. deiner API |
+| Max. Antwortlänge | 300 Token | Obergrenze pro KI-Antwort |
 | Min./Max. Verzögerung | 45 s / 3 h | Bereich der zufälligen Antwortzeit (Median ≈ 12 min) |
 | Nachtruhe | 23–7 Uhr | Antworten in dieser Zeit werden auf den Morgen verschoben |
-| Tageslimit | 40 | max. KI-Nachrichten pro Chat und Tag |
-| Kontext | 40 | so viele Nachrichten bekommt das Modell als Verlauf |
+| Tageslimit | 40 | max. automatische KI-Nachrichten pro Chat und Tag |
+| Kontext | 30 | so viele Nachrichten bekommt das Modell als Verlauf |
+| Analyse | alle 10 Nachrichten | automatische Lage-Analyse, optional mit eigenem (günstigem) Modell |
+
+### Tokens sparen
+
+Pro KI-Antwort geht der System-Prompt (Regeln + Persona, ca. 500 Token) plus der Verlauf an das Modell; die
+Antwort selbst ist klein. Einige hundert bis gut tausend Token pro Antwort sind deshalb normal. Die App hält
+die Kosten so niedrig wie möglich:
+
+- **Prompt-Caching:** Der Anfang jeder Anfrage (System-Prompt + Verlauf) bleibt gleich; Uhrzeit und Regieanweisung
+  stehen am Ende. Das Verlaufsfenster rückt in 10er-Schritten weiter. Anbieter mit Caching (OpenAI, DeepSeek,
+  Gemini u. a.) berechnen den wiederholten Teil deutlich günstiger. Im Log steht bei jedem Aufruf, wie viele Token
+  aus dem Cache kamen.
+- Im Automatikmodus entsteht der Entwurf erst **kurz vor dem Senden**, nicht bei jeder neuen Scammer-Nachricht.
+- Scheitert ein Entwurf am Sicherheitsfilter, wird nicht automatisch endlos neu generiert.
+- Weniger Kontext und ein günstiges Analyse-Modell senken die Kosten weiter.
 
 ### Gute Personas
 
@@ -110,5 +151,8 @@ Aufbau:
 | `tarpit/prompts.py` | System-Prompt und Beispiel-Personas |
 | `tarpit/safety.py` | Filter für ausgehende Nachrichten |
 | `tarpit/timing.py` | Verzögerungen, Nachtruhe, Tippdauer |
-| `tarpit/web.py` + `templates/` | Webinterface (FastAPI, Jinja2) |
+| `tarpit/analysis.py` | KI-Analyse (Lage, Schlagworte, Best-of) und lokale Auswertungen |
+| `tarpit/charts.py` | Diagramme als SVG/HTML, ohne externe Bibliothek |
+| `tarpit/logs.py` | Log-Einträge für die Statusseite |
+| `tarpit/web.py` + `templates/` + `static/` | Webinterface (FastAPI, Jinja2, etwas JavaScript) |
 | `tarpit/db.py` | SQLite-Speicher |

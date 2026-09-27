@@ -9,6 +9,13 @@
     <label>Modell-ID <input type="text" name="model" value="{{ settings.model }}"></label>
     <p class="muted small">API: {{ llm_base_url }}. Bei OpenRouter z. B. <code>openai/gpt-4o-mini</code>, <code>meta-llama/llama-3.3-70b-instruct</code>; siehe openrouter.ai/models.</p>
     <label>Temperatur (0–2) <input type="text" name="temperature" value="{{ settings.temperature }}"></label>
+    <label>Max. Länge einer Antwort (Token) <input type="number" name="max_reply_tokens" value="{{ settings.max_reply_tokens }}"></label>
+  </fieldset>
+  <fieldset>
+    <legend>Analyse (Lage, Schlagworte, Best-of)</legend>
+    <label class="check"><input type="checkbox" name="auto_analyze" value="1" {{ 'checked' if settings.auto_analyze }}> Automatisch analysieren</label>
+    <label>Neu analysieren nach so vielen neuen Nachrichten <input type="number" name="analyze_every" min="1" value="{{ settings.analyze_every }}"></label>
+    <label>Modell für die Analyse (leer = gleiches Modell) <input type="text" name="analysis_model" value="{{ settings.analysis_model }}" placeholder="z. B. ein günstigeres Modell"></label>
   </fieldset>
   <fieldset>
     <legend>Tarpit-Timing</legend>
@@ -22,6 +29,7 @@
     <legend>Limits</legend>
     <label>Max. KI-Nachrichten pro Chat und Tag <input type="number" name="daily_limit" value="{{ settings.daily_limit }}"></label>
     <label>Nachrichten Kontext für die KI <input type="number" name="history_limit" value="{{ settings.history_limit }}"></label>
+    <p class="muted small">Weniger Kontext = weniger Token pro Antwort. Das Fenster rückt in 10er-Schritten weiter, damit Prompt-Caching greift.</p>
   </fieldset>
   <button class="btn primary">Speichern</button>
 </form>

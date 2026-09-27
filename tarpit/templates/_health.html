@@ -1,0 +1,22 @@
+{# Statusleiste: Telegram, KI-Modell, Probleme, Tokens #}
+<div class="health">
+  <a class="health-item" href="/logs?source=telegram" id="health-telegram" data-ok="{{ '1' if health.telegram_connected and health.telegram_authorized else '0' }}">
+    <span class="dot"></span>
+    <span><strong>Telegram</strong><br><span class="muted small">{% if not health.telegram_authorized %}nicht angemeldet{% elif health.telegram_connected %}verbunden{% else %}getrennt{% endif %}</span></span>
+  </a>
+  <a class="health-item" href="/logs?source=llm" data-ok="{{ {True: '1', False: '0', None: 'unknown'}[health.llm_healthy] }}">
+    <span class="dot"></span>
+    <span><strong>KI-Modell</strong><br><span class="muted small">
+      {% if health.llm_healthy is none %}noch nicht benutzt{% elif health.llm_healthy %}ok · {{ health.llm.last_latency_ms }} ms{% else %}Fehler {{ health.llm.last_error_at | ago }}{% endif %}
+    </span></span>
+  </a>
+  <a class="health-item" href="/logs?level=problems" data-ok="{{ '1' if health.problems_24h == 0 else 'warn' }}">
+    <span class="dot"></span>
+    <span><strong>{{ health.problems_24h }} Probleme</strong><br><span class="muted small">letzte 24 h</span></span>
+  </a>
+  <a class="health-item" href="/logs?source=llm" data-ok="info">
+    <span class="dot"></span>
+    <span><strong>{{ "{:,}".format(health.llm.tokens_today).replace(",", ".") }} Token heute</strong><br>
+      <span class="muted small">{{ health.llm.calls_today }} Aufrufe{% if health.llm.cost_today %} · {{ health.llm.cost_today | usd }}{% endif %}{% if health.llm.cache_rate is not none %} · {{ (health.llm.cache_rate * 100) | round | int }} % Cache{% endif %}</span></span>
+  </a>
+</div>

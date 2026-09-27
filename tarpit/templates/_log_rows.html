@@ -1,0 +1,11 @@
+{% for e in events %}
+<tr class="lvl-{{ e.level | lower }}">
+  <td class="mono nowrap">{{ e.ts | tsfull }}</td>
+  <td>{{ {'INFO': 'ℹ️ Info', 'WARNING': '⚠️ Warnung', 'ERROR': '❌ Fehler', 'CRITICAL': '❌ Kritisch'}.get(e.level, e.level) }}</td>
+  <td>{{ sources.get(e.source, e.source) }}</td>
+  <td>{% if e.chat_id %}<a href="/chats/{{ e.chat_id }}">{{ titles.get(e.chat_id, e.chat_id) }}</a>{% endif %}</td>
+  <td class="msg-cell">{{ e.message }}</td>
+</tr>
+{% else %}
+<tr><td colspan="5" class="muted">Keine Einträge.</td></tr>
+{% endfor %}
