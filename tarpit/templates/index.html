@@ -41,6 +41,7 @@
         <a href="/chats/{{ c.chat_id }}"><strong>{{ c.title }}</strong></a>
         {% if c.username %}<span class="muted small">@{{ c.username }}</span>{% endif %}
         {% if a %}<div class="small"><span class="chip">{{ a.scam_type }}</span> <span class="muted">Phase {{ a.stage }}: {{ stages[a.stage - 1] }}</span></div>{% endif %}
+        {% if c.referred_from %}<div class="small muted">↪ vermittelt von {{ chat_titles.get(c.referred_from, c.referred_from) }}</div>{% endif %}
       </td>
       <td>
         <form method="post" action="/chats/{{ c.chat_id }}/enabled">
@@ -99,9 +100,33 @@
   <div class="card">{{ chart_wasted | safe }}</div>
 </section>
 
+{% if referrals %}
+<h2>↪ Weiterleitungen</h2>
+<div class="card">
+  <ul class="referrals">
+  {% for r in referrals %}
+    <li class="ref-{{ r.status }}">
+      <span class="mono small muted">{{ r.created_at | tsfull }}</span>
+      <a href="/chats/{{ r.source_chat_id }}">{{ r.source_title }}</a> → <strong>{{ candidate_label(r) }}</strong>
+      <span class="chip">{{ {'proposed': '❓ wartet auf dich', 'pending': '⏳ in Arbeit', 'scheduled': '⏳ erste Nachricht geplant',
+                             'drafted': '👀 wartet auf Freigabe', 'contacted': '✅ angeschrieben',
+                             'skipped': '⏭ übersprungen', 'failed': '❌ fehlgeschlagen'}.get(r.status, r.status) }}</span>
+      {% if r.target_chat_id %}<a href="/chats/{{ r.target_chat_id }}">{{ r.target_title or 'neuer Chat' }}</a>{% endif %}
+      {% if r.reason and r.status in ('skipped', 'failed') %}<span class="muted small">({{ r.reason }})</span>{% endif %}
+      {% if r.status == 'proposed' %}
+        <form method="post" action="/referrals/{{ r.id }}/accept" class="inline"><button class="btn small primary">Anschreiben</button></form>
+        <form method="post" action="/referrals/{{ r.id }}/ignore" class="inline"><button class="btn small">Ignorieren</button></form>
+      {% endif %}
+    </li>
+  {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
 <h2>🏆 Best-of</h2>
 <section class="grid-2">
   <div class="card">
+    <figure class="viz"><figcaption>☁️ Wortwolke aller KI-Chats</figcaption>{{ wordcloud | safe }}</figure>
     <figure class="viz"><figcaption>Schlagworte der Scammer (aus den KI-Analysen)</figcaption>{{ cloud | safe }}</figure>
     {{ chart_lexicon | safe }}
   </div>

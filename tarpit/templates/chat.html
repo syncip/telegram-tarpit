@@ -14,6 +14,7 @@
     </p>
   </div>
   <div class="actions">
+    <a class="btn" href="/chats/{{ chat.chat_id }}/verlauf">📜 Verlauf &amp; Auswertung</a>
     <form method="post" action="/chats/{{ chat.chat_id }}/enabled">
       <input type="hidden" name="value" value="{{ '0' if chat.enabled else '1' }}">
       <input type="hidden" name="next" value="/chats/{{ chat.chat_id }}">
@@ -30,6 +31,10 @@
     </form>
   </div>
 </section>
+
+{% if source_chat %}
+<p class="banner small">↪ Diesen Kontakt hat dir <a href="/chats/{{ source_chat.chat_id }}">{{ source_chat.title }}</a> vermittelt. Die KI kennt den Hintergrund aus diesem Chat.</p>
+{% endif %}
 
 <div class="chat-layout">
   <div class="chat-main">
@@ -115,43 +120,7 @@
 
   {# --- Seitenleiste: Lage, Zahlen, Grafik, Log ------------------------------ #}
   <aside class="chat-side">
-    <section class="card">
-      <div class="row between">
-        <h2 class="flush">🧭 Lage</h2>
-        <form method="post" action="/chats/{{ chat.chat_id }}/analyze">
-          <button class="btn small" title="Analyse jetzt neu erstellen (kostet einen KI-Aufruf)">🔄 Analysieren</button>
-        </form>
-      </div>
-      {% if analysis %}
-        <p><span class="chip">{{ analysis.scam_type }}</span> <strong class="small">Phase {{ analysis.stage }}: {{ stages[analysis.stage - 1] }}</strong> <span class="muted small">· Stand {{ chat.analysis_at | ago }}</span></p>
-        <ol class="stages">
-          {% for name in stages_short %}
-          <li class="{{ 'done' if loop.index < analysis.stage else ('current' if loop.index == analysis.stage else '') }}" data-tip="Phase {{ loop.index }}: {{ stages[loop.index0] }}">{{ name }}</li>
-          {% endfor %}
-        </ol>
-        <p>{{ analysis.summary }}</p>
-        {% if analysis.scammer_goal %}<p class="small"><strong>🎣 Scammer will:</strong> {{ analysis.scammer_goal }}</p>{% endif %}
-        {% if analysis.bait_tactic %}<p class="small"><strong>🤖 KI hält hin mit:</strong> {{ analysis.bait_tactic }}</p>{% endif %}
-        <div class="meter-row" data-tip="Wie genervt wirkt der Scammer? {{ analysis.frustration }} von 10">
-          <span class="small">Frust-Level</span>
-          <div class="meter"><div class="meter-fill" style="width: {{ analysis.frustration * 10 }}%"></div></div>
-          <span class="small mono">{{ analysis.frustration }}/10</span>
-        </div>
-        {% if analysis.keywords %}
-        <p class="small"><strong>Schlagworte:</strong><br>
-          {% for kw in analysis.keywords %}<span class="chip">{{ kw }}</span> {% endfor %}
-        </p>
-        {% endif %}
-        {% if analysis.best_of %}
-        <h3>⭐ Best-of</h3>
-        {% for q in analysis.best_of %}
-          <blockquote class="quote {{ q.sender }}">{{ q.text }}<footer>{{ '🎣 Scammer' if q.sender == 'them' else '🤖 Köder' }}</footer></blockquote>
-        {% endfor %}
-        {% endif %}
-      {% else %}
-        <p class="muted">Noch keine Analyse. Sie entsteht automatisch alle {{ settings.analyze_every }} Nachrichten{% if not settings.auto_analyze %} (derzeit ausgeschaltet){% endif %}, oder per Knopf.</p>
-      {% endif %}
-    </section>
+    <div id="lage">{% include "_lage.html" %}</div>
 
     <section class="card">
       <div class="stats compact">

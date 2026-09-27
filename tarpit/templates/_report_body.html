@@ -1,0 +1,61 @@
+<div class="chat-layout">
+  <div class="chat-main">
+    <section class="card">
+      <h2 class="flush">☁️ Wortwolke</h2>
+      <p class="muted small">Die häufigsten Wörter aus {{ total_messages }} Nachrichten. Größe = Häufigkeit, Farbe = wer das Wort vor allem benutzt.</p>
+      {{ cloud | safe }}
+    </section>
+
+    <section class="card">
+      <h2 class="flush">💬 Gesamter Verlauf ({{ total_messages }} Nachrichten)</h2>
+      <div class="transcript">
+        {% for day, msgs in days %}
+          <div class="day-group{{ ' only-notes' if msgs | rejectattr('sender', 'equalto', 'note') | list | length == 0 }}">
+            <div class="day-header">{{ day }}</div>
+            {% for m in msgs %}
+              <div class="msg {{ m.sender }}{{ ' best' if m.id in best_of else '' }}" data-text="{{ m.text | lower }}">
+                <div class="bubble">{% if m.id in best_of %}<span class="star" data-tip="Im Best-of dieser Unterhaltung">⭐</span> {% endif %}{{ m.text }}</div>
+                <div class="meta">
+                  {{ {'them': '🎣 Scammer', 'ai': '🤖 KI', 'me': '🙋 Du', 'note': 'ℹ️ Vermerk'}[m.sender] }}{% if m.edited %} · ✏️ bearbeitet{% endif %} · {{ m.ts | tsfull }}
+                </div>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="muted">Noch keine Nachrichten.</p>
+        {% endfor %}
+      </div>
+    </section>
+  </div>
+
+  <aside class="chat-side">
+    <div id="lage">{% with next_url = '/chats/' ~ chat.chat_id ~ '/verlauf' %}{% include "_lage.html" %}{% endwith %}</div>
+
+    <section class="card">
+      <h2 class="flush">🕰 Frühere Zusammenfassungen</h2>
+      <p class="muted small">So war der Stand jeweils zu diesem Zeitpunkt.</p>
+      {% for h in history %}
+        <details class="snapshot" {{ 'open' if loop.first }}>
+          <summary><span class="mono">{{ h.ts | tsfull }}</span> · Phase {{ h.stage }}: {{ stages[h.stage - 1] }} <span class="muted small">(nach {{ h.messages }} Nachrichten)</span></summary>
+          <p>{{ h.summary }}</p>
+          {% if h.scammer_goal %}<p class="small"><strong>🎣 Scammer will:</strong> {{ h.scammer_goal }}</p>{% endif %}
+          {% if h.bait_tactic %}<p class="small"><strong>🤖 KI hält hin mit:</strong> {{ h.bait_tactic }}</p>{% endif %}
+          <p class="small muted">Frust-Level {{ h.frustration }}/10 · {{ h.scam_type }}</p>
+        </details>
+      {% else %}
+        <p class="muted">Noch keine. Klick auf „📝 Kurzzusammenfassung“.</p>
+      {% endfor %}
+    </section>
+
+    <section class="card">
+      <div class="stats compact">
+        <div class="stat"><span>{{ row.n_them if row else 0 }}</span>Scammer-Msgs</div>
+        <div class="stat"><span>{{ row.n_ai if row else 0 }}</span>KI-Msgs</div>
+        <div class="stat"><span>{{ wasted | duration }}</span>gebunden</div>
+        <div class="stat"><span>{{ times.scammer | duration }}</span>Ø Scammer antwortet</div>
+        <div class="stat"><span>{{ times.bait | duration }}</span>Ø Köder antwortet</div>
+      </div>
+      {{ chart | safe }}
+    </section>
+  </aside>
+</div>

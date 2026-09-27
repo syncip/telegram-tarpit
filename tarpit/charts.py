@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import html
 import math
+import zlib
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
@@ -182,3 +183,39 @@ def hourly_series(rows, hours: int, now: datetime | None = None) -> tuple[list[s
         Series("Scammer", "s-them", [counts[("them", k.strftime(fmt))] for k in keys]),
         Series("Köder (KI/du)", "s-ai", [counts[("bait", k.strftime(fmt))] for k in keys]),
     ]
+
+
+def word_cloud(counts: list[tuple[str, int, int]], empty: str, limit: int = 60, min_count: int = 2) -> str:
+    """Wortwolke: Größe = Häufigkeit, Farbe = wer das Wort überwiegend benutzt."""
+    items = [c for c in counts if c[1] + c[2] >= min_count][:limit]
+    if not items:
+        return f'<p class="muted">{html.escape(empty)}</p>'
+    peak = max(t + b for _, t, b in items)
+    low = min(t + b for _, t, b in items)
+    # Reihenfolge durchmischen, aber stabil (sonst stehen alle großen Wörter vorne)
+    shuffled = sorted(items, key=lambda c: zlib.crc32(c[0].encode()))
+    words = []
+    for word, them, bait in shuffled:
+        total = them + bait
+        scale = (math.sqrt(total) - math.sqrt(low)) / ((math.sqrt(peak) - math.sqrt(low)) or 1)
+        size = 0.8 + 1.7 * scale
+        share = them / total
+        css = "w-them" if share >= 0.65 else "w-ai" if share <= 0.35 else "w-both"
+        tip = f"{word}: {total}× (Scammer {them}, Köder {bait})"
+        words.append(
+            f'<span class="word {css}" style="font-size:{size:.2f}rem" data-tip="{html.escape(tip)}">'
+            f"{html.escape(word)}</span>"
+        )
+    legend = (
+        '<div class="legend"><span class="legend-item"><span class="swatch s-them"></span>vor allem Scammer</span>'
+        '<span class="legend-item"><span class="swatch s-ai"></span>vor allem Köder</span>'
+        '<span class="legend-item"><span class="swatch s-both"></span>beide</span></div>'
+    )
+    rows = "".join(
+        f"<tr><td>{html.escape(w)}</td><td>{t}</td><td>{b}</td></tr>" for w, t, b in items[:30]
+    )
+    table = (
+        '<details class="table-view"><summary>Als Tabelle</summary><table><thead><tr><th>Wort</th>'
+        f"<th>Scammer</th><th>Köder</th></tr></thead><tbody>{rows}</tbody></table></details>"
+    )
+    return f'{legend}<div class="wordcloud">{" ".join(words)}</div>{table}'

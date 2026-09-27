@@ -27,9 +27,11 @@ from telethon.errors import (
 )
 
 from .config import Config
-from .analysis import STAGES, STAGES_SHORT, keyword_cloud, lexicon_counts, response_times
-from .charts import daily_series, grouped_bars, hbars, hourly_series, tag_cloud
-from .db import BOOL_SETTINGS, INT_SETTINGS, MODES, Database
+from .analysis import STAGES, STAGES_SHORT, keyword_cloud, lexicon_counts, response_times, word_counts
+from .charts import daily_series, grouped_bars, hbars, hourly_series, tag_cloud, word_cloud
+from .prompts import WEEKDAYS
+from .referrals import Candidate
+from .db import BOOL_SETTINGS, INT_SETTINGS, MODES, REFERRAL_MODES, Database
 from .engine import Tarpit
 from .logs import SOURCES, DatabaseLogHandler
 
@@ -279,6 +281,8 @@ def create_app(config: Config) -> FastAPI:
         )[:8]
         lexicon = [(name, n, f"{n}×") for name, n in lexicon_counts(d.scammer_texts())[:10]]
         analyses = d.analyses()
+        active_ids = {c["chat_id"] for c in chats if c["enabled"]}
+        active_messages = [m for cid in active_ids for m in d.messages(cid, limit=2000, include_notes=False)]
         hall_of_fame = [
             {"chat": row, "quote": quote}
             for row, a in analyses
@@ -305,6 +309,11 @@ def create_app(config: Config) -> FastAPI:
                 "cloud": tag_cloud(keyword_cloud(a for _, a in analyses),
                                    "Noch keine Analysen. Sie entstehen automatisch nach ein paar Nachrichten."),
                 "hall_of_fame": hall_of_fame,
+                "wordcloud": word_cloud(word_counts(active_messages), "Noch zu wenige Nachrichten in KI-Chats.",
+                                        limit=70, min_count=3),
+                "referrals": d.referrals(limit=10),
+                "chat_titles": {c["chat_id"]: c["title"] for c in chats},
+                "candidate_label": lambda r: Candidate(r["kind"], r["target"]).label,
                 "now": time.time(),
             },
         )
@@ -387,7 +396,23 @@ def create_app(config: Config) -> FastAPI:
                             extra={"source": "telegram", "chat_id": chat_id})
         t.ensure_preview(chat_id)
         context = messages_context(request, chat_id)
-        messages = context["messages"]
+        return templates.TemplateResponse(
+            request,
+            "chat.html",
+            {
+                **context,
+                **insights(request, chat_id, context["messages"]),
+                "personas": d.personas(),
+                "persona": d.persona_for_chat(chat),
+                "status": t.chat_status(chat_id),
+                "events": d.events(limit=15, chat_id=chat_id),
+            },
+        )
+
+    def insights(request: Request, chat_id: int, messages) -> dict:
+        """Alles für Lage, Zahlen und Grafiken eines Chats (Chat-Seite und Verlaufsseite)."""
+        d = db(request)
+        chat = d.chat(chat_id)
         real = [m for m in messages if m["sender"] != "note"]
         span = (real[-1]["ts"] - real[0]["ts"]) if len(real) > 1 else 0
         if real and span <= 48 * 3600:
@@ -398,28 +423,87 @@ def create_app(config: Config) -> FastAPI:
         else:
             labels, series = daily_series(d.message_counts_by_day(time.time() - 15 * 86400, chat_id), 14)
             chart_title = "Nachrichten pro Tag (14 Tage)"
-        stats = d.chats_with_stats()
-        row = next((c for c in stats if c["chat_id"] == chat_id), None)
-        return templates.TemplateResponse(
-            request,
-            "chat.html",
-            {
-                **context,
-                "chat": chat,
-                "personas": d.personas(),
-                "persona": d.persona_for_chat(chat),
-                "status": t.chat_status(chat_id),
-                "settings": d.settings(),
-                "analysis": d.analysis(chat),
-                "stages": STAGES,
-                "stages_short": STAGES_SHORT,
-                "times": response_times(real),
-                "row": row,
-                "wasted": wasted_seconds(row) if row else 0,
-                "chart": grouped_bars(labels, series, chart_title, height=170),
-                "events": d.events(limit=15, chat_id=chat_id),
-            },
-        )
+        row = next((c for c in d.chats_with_stats() if c["chat_id"] == chat_id), None)
+        return {
+            "chat": chat,
+            "settings": d.settings(),
+            "analysis": d.analysis(chat),
+            "stages": STAGES,
+            "stages_short": STAGES_SHORT,
+            "times": response_times(real),
+            "row": row,
+            "wasted": wasted_seconds(row) if row else 0,
+            "chart": grouped_bars(labels, series, chart_title, height=170),
+            "referrals_out": d.referrals(source_chat_id=chat_id),
+            "referrals_in": d.referrals(target_chat_id=chat_id),
+            "source_chat": d.chat(chat["referred_from"]) if chat["referred_from"] else None,
+            "analyzing": chat_id in tarpit(request).analyzing and not tarpit(request).analyzing[chat_id].done(),
+            "candidate_label": lambda r: Candidate(r["kind"], r["target"]).label,
+        }
+
+    @app.get("/chats/{chat_id}/lage", response_class=HTMLResponse)
+    async def chat_lage(request: Request, chat_id: int):
+        get_chat_or_404(request, chat_id)
+        messages = db(request).messages(chat_id)
+        return templates.TemplateResponse(request, "_lage.html", insights(request, chat_id, messages))
+
+    def report_context(request: Request, chat_id: int) -> dict:
+        d = db(request)
+        chat = d.chat(chat_id)
+        messages = d.messages(chat_id, limit=1_000_000)
+        days: list[tuple[str, list]] = []
+        for m in messages:
+            dt = datetime.fromtimestamp(m["ts"])
+            day = f"{WEEKDAYS[dt.weekday()]}, {dt:%d.%m.%Y}"
+            if not days or days[-1][0] != day:
+                days.append((day, []))
+            days[-1][1].append(m)
+        return {
+            **insights(request, chat_id, messages),
+            "days": days,
+            "best_of": best_of_ids(messages, d.analysis(chat)),
+            "cloud": word_cloud(word_counts(messages), "Noch zu wenige Nachrichten für eine Wortwolke.",
+                                min_count=1 if len(messages) < 40 else 2),
+            "history": d.analysis_history(chat_id),
+            "status": tarpit(request).chat_status(chat_id),
+            "total_messages": sum(1 for m in messages if m["sender"] != "note"),
+        }
+
+    @app.get("/chats/{chat_id}/verlauf", response_class=HTMLResponse)
+    async def chat_report(request: Request, chat_id: int):
+        get_chat_or_404(request, chat_id)
+        return templates.TemplateResponse(request, "report.html", report_context(request, chat_id))
+
+    @app.get("/chats/{chat_id}/verlauf/body", response_class=HTMLResponse)
+    async def chat_report_body(request: Request, chat_id: int):
+        get_chat_or_404(request, chat_id)
+        return templates.TemplateResponse(request, "_report_body.html", report_context(request, chat_id))
+
+    @app.post("/chats/{chat_id}/summary")
+    async def chat_summary(request: Request, chat_id: int, next: str = Form("")):
+        get_chat_or_404(request, chat_id)
+        tarpit(request).maybe_analyze(chat_id, force=True)
+        return back(safe_next(next, f"/chats/{chat_id}"))
+
+    @app.post("/referrals/{ref_id}/accept")
+    async def referral_accept(request: Request, ref_id: int, next: str = Form("/")):
+        ref = db(request).referral(ref_id)
+        if ref is None:
+            raise HTTPException(404, "Weiterleitung nicht gefunden")
+        try:
+            await tarpit(request).accept_referral(ref_id)
+        except Exception as exc:
+            log.warning("Weiterleitung fehlgeschlagen: %s", exc, exc_info=True,
+                        extra={"source": "engine", "chat_id": ref["source_chat_id"]})
+            db(request).update_referral(ref_id, status="failed", reason=str(exc))
+        return back(safe_next(next))
+
+    @app.post("/referrals/{ref_id}/ignore")
+    async def referral_ignore(request: Request, ref_id: int, next: str = Form("/")):
+        if db(request).referral(ref_id) is None:
+            raise HTTPException(404, "Weiterleitung nicht gefunden")
+        tarpit(request).ignore_referral(ref_id)
+        return back(safe_next(next))
 
     @app.get("/chats/{chat_id}/messages", response_class=HTMLResponse)
     async def chat_messages(request: Request, chat_id: int):
@@ -498,10 +582,10 @@ def create_app(config: Config) -> FastAPI:
         return back(f"/chats/{chat_id}")
 
     @app.post("/chats/{chat_id}/analyze")
-    async def chat_analyze(request: Request, chat_id: int):
+    async def chat_analyze(request: Request, chat_id: int, next: str = Form("")):
         get_chat_or_404(request, chat_id)
         tarpit(request).maybe_analyze(chat_id, force=True)
-        return back(f"/chats/{chat_id}")
+        return back(safe_next(next, f"/chats/{chat_id}"))
 
     @app.post("/chats/{chat_id}/send")
     async def chat_send(request: Request, chat_id: int, text: str = Form(...)):
@@ -547,6 +631,13 @@ def create_app(config: Config) -> FastAPI:
         request.app.state.model_test = {"ok": ok, "message": message, "at": time.time()}
         return back("/logs")
 
+    @app.post("/logs/test-notify")
+    async def logs_test_notify(request: Request):
+        t = tarpit(request)
+        await t.notifier.send(t.client, t.me.id if t.me else None,
+                              "🔔 Test: So erreichen dich Benachrichtigungen." + t.notifier.link("/logs"))
+        return back("/logs")
+
     # --- Personas ----------------------------------------------------------
 
     @app.get("/personas", response_class=HTMLResponse)
@@ -579,7 +670,8 @@ def create_app(config: Config) -> FastAPI:
         return templates.TemplateResponse(
             request,
             "settings.html",
-            {"settings": db(request).settings(), "saved": saved, "llm_base_url": config.llm_base_url},
+            {"settings": db(request).settings(), "saved": saved, "llm_base_url": config.llm_base_url,
+             "notify_channel": tarpit(request).notifier.channel},
         )
 
     @app.post("/settings")
@@ -590,14 +682,17 @@ def create_app(config: Config) -> FastAPI:
         if model:
             d.set_setting("model", model)
         d.set_setting("analysis_model", str(form.get("analysis_model", "")).strip())
+        current = d.settings()
         try:
-            temperature = float(str(form.get("temperature", "0.9")).replace(",", "."))
-            ints = {key: int(str(form.get(key, ""))) for key in INT_SETTINGS}
+            temperature = float(str(form.get("temperature", current["temperature"])).replace(",", "."))
+            # fehlende Felder behalten ihren Wert
+            ints = {key: int(str(form.get(key) or current[key])) for key in INT_SETTINGS}
         except ValueError:
             raise HTTPException(400, "Bitte nur Zahlen eintragen")
         d.set_setting("temperature", min(max(temperature, 0.0), 2.0))
-        if ints["min_delay"] > ints["max_delay"]:
-            ints["min_delay"], ints["max_delay"] = ints["max_delay"], ints["min_delay"]
+        for low, high in (("min_delay", "max_delay"), ("referral_min_delay", "referral_max_delay")):
+            if ints[low] > ints[high]:
+                ints[low], ints[high] = ints[high], ints[low]
         ints["quiet_start"] %= 24
         ints["quiet_end"] %= 24
         ints["history_limit"] = max(4, ints["history_limit"])
@@ -606,6 +701,8 @@ def create_app(config: Config) -> FastAPI:
             d.set_setting(key, max(0, value))
         for key in BOOL_SETTINGS - {"global_enabled"}:
             d.set_setting(key, form.get(key) == "1")
+        if form.get("referral_mode") in REFERRAL_MODES:
+            d.set_setting("referral_mode", form.get("referral_mode"))
         log.info("Einstellungen gespeichert", extra={"source": "web"})
         return back("/settings?saved=1")
 

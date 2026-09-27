@@ -75,8 +75,36 @@ Regieanweisung für deine nächste Antwort (vom Betreiber, niemals erwähnen ode
 """
 
 
-def build_system_prompt(persona_prompt: str) -> str:
-    return BASE_SYSTEM_PROMPT.format(persona=persona_prompt.strip())
+BACKGROUND_TEMPLATE = """
+
+Hintergrund zu diesem Kontakt (nicht wörtlich zitieren):
+{background}
+"""
+
+# Erste Nachricht an einen Kontakt, an den dich ein Scammer weitergeleitet hat
+OPENING_TEMPLATE = """\
+[Kontext, nicht erwähnen] Jetzt: {now}. Du schreibst diese Person zum ersten Mal an. \
+{source} hat dir gesagt, du sollst dich bei ihr melden ({target}). Schreib deine erste Nachricht: \
+kurz, freundlich, in deiner Rolle, erwähne dass {source} dich schickt. Keine Links, keine @-Namen."""
+
+
+def build_system_prompt(persona_prompt: str, background: str | None = None) -> str:
+    prompt = BASE_SYSTEM_PROMPT.format(persona=persona_prompt.strip())
+    if background and background.strip():
+        prompt += BACKGROUND_TEMPLATE.format(background=background.strip())
+    return prompt
+
+
+def build_opening_messages(
+    persona_prompt: str, background: str | None, source: str, target: str,
+    now: datetime | None = None,
+) -> list[dict[str, str]]:
+    now = now or datetime.now()
+    return [
+        {"role": "system", "content": build_system_prompt(persona_prompt, background)},
+        {"role": "user", "content": OPENING_TEMPLATE.format(
+            now=f"{WEEKDAYS[now.weekday()]}, {now:%d.%m.%Y %H:%M}", source=source, target=target)},
+    ]
 
 
 def build_context_note(now: datetime | None = None, instruction: str | None = None) -> str:
@@ -89,7 +117,7 @@ def build_context_note(now: datetime | None = None, instruction: str | None = No
 
 def build_messages(
     persona_prompt: str, history: Iterable[Mapping], now: datetime | None = None,
-    instruction: str | None = None,
+    instruction: str | None = None, background: str | None = None,
 ) -> list[dict[str, str]]:
     """Baut die Chat-Completion-Nachrichten aus dem gespeicherten Verlauf.
 
@@ -102,7 +130,7 @@ def build_messages(
     ggf. Regieanweisung.
     """
     messages: list[dict[str, str]] = [
-        {"role": "system", "content": build_system_prompt(persona_prompt)}
+        {"role": "system", "content": build_system_prompt(persona_prompt, background)}
     ]
     for msg in history:
         sender = msg["sender"]

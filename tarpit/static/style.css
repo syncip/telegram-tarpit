@@ -181,3 +181,22 @@ table.kv td { padding: 4px 0; }
 table.chats td:first-child { min-width: 170px; }
 table.chats select { max-width: 190px; }
 input, select, textarea, button { max-width: 100%; }
+
+/* --- Wortwolke & Verlauf ------------------------------------------------------ */
+.wordcloud { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 4px 14px; padding: 10px 4px; line-height: 1.15; }
+.word { font-weight: 650; cursor: default; }
+.w-them { color: var(--series-them); }
+.w-ai { color: var(--series-ai); }
+.w-both { color: var(--text); }
+.s-both { background: var(--text); }
+.transcript { display: flex; flex-direction: column; gap: 8px; }
+.day-group { display: flex; flex-direction: column; gap: 8px; }
+.day-header { position: sticky; top: 0; z-index: 1; align-self: center; background: var(--bg); border: 1px solid var(--border); border-radius: 999px; padding: 2px 12px; font-size: .8rem; color: var(--muted); margin: 8px 0 2px; }
+.hide-notes .transcript .msg.note, .hide-notes .day-group.only-notes { display: none; }
+#report-search { min-width: 240px; font: inherit; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--text); }
+.snapshot { border-top: 1px solid var(--border); padding: 8px 0; }
+.snapshot summary { cursor: pointer; }
+.snapshot p { margin: 6px 0; }
+.referrals { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-direction: column; gap: 8px; }
+.referrals li { padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+.referrals li:last-child { border-bottom: 0; }

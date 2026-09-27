@@ -90,6 +90,7 @@
     const countdown = document.getElementById("next-reply");
     const badge = document.getElementById("reply-state");
     let lastMsgId = chatRoot.dataset.lastMsgId;
+    let lastLageKey = null;
     let draftDirty = false;
     let lastDraft = draft ? draft.value : "";
     if (draft) draft.addEventListener("input", () => { draftDirty = draft.value !== lastDraft; });
@@ -137,11 +138,62 @@
           if (text !== draft.value) { draft.value = text; lastDraft = text; }
         }
         if (String(s.last_msg_id) !== String(lastMsgId)) { lastMsgId = s.last_msg_id; await reloadMessages(); }
+        // Lage-Karte neu laden, wenn eine neue Zusammenfassung da ist oder gerade entsteht
+        const lageKey = [s.analysis_at, s.analyzing, s.last_msg_id].join("|");
+        if (lastLageKey !== null && lageKey !== lastLageKey) await reloadFragment("lage", "/chats/" + chatId + "/lage");
+        lastLageKey = lageKey;
         tick();
       } catch (e) { /* nächster Versuch */ }
     }
     poll();
     setInterval(poll, 2000);
+  }
+
+  async function reloadFragment(id, url) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const res = await fetch(url, { credentials: "same-origin" });
+    if (res.ok) el.innerHTML = await res.text();
+  }
+
+  // --- Verlauf & Auswertung ----------------------------------------------------
+  const report = document.querySelector("[data-report-chat-id]");
+  if (report) {
+    const chatId = report.dataset.reportChatId;
+    const search = document.getElementById("report-search");
+    const notes = document.getElementById("report-notes");
+    let key = [report.dataset.lastMsgId, report.dataset.analysisAt, report.dataset.analyzing].join("|");
+
+    function applyFilter() {
+      const q = (search.value || "").trim().toLowerCase();
+      const body = document.getElementById("report-body");
+      body.classList.toggle("hide-notes", !notes.checked);
+      body.querySelectorAll(".transcript .msg").forEach((m) => {
+        m.hidden = q !== "" && !(m.dataset.text || "").includes(q);
+      });
+      body.querySelectorAll(".day-group").forEach((g) => {
+        g.hidden = q !== "" && !g.querySelector(".msg:not([hidden])");
+      });
+    }
+    search.addEventListener("input", applyFilter);
+    notes.addEventListener("change", applyFilter);
+    applyFilter();
+
+    setInterval(async () => {
+      try {
+        const s = await getJSON("/chats/" + chatId + "/status");
+        const next = [s.last_msg_id, s.analysis_at || "", s.analyzing ? "1" : ""].join("|");
+        if (next !== key) {
+          key = next;
+          const y = window.scrollY;
+          await reloadFragment("report-body", "/chats/" + chatId + "/verlauf/body");
+          applyFilter();
+          window.scrollTo(0, y);
+        }
+        const stamp = document.getElementById("report-updated");
+        if (stamp) stamp.textContent = clock(s.now);
+      } catch (e) { /* nächster Versuch */ }
+    }, 4000);
   }
 
   // --- Log-Seite ---------------------------------------------------------------

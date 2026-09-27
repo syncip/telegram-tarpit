@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Verlauf: {{ chat.title }} – Telegram Tarpit{% endblock %}
+{% block page %}report{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+<div data-report-chat-id="{{ chat.chat_id }}" data-last-msg-id="{{ status.last_msg_id }}"
+     data-analysis-at="{{ status.analysis_at or '' }}" data-analyzing="{{ '1' if analyzing else '' }}">
+  <section class="row between">
+    <div>
+      <p class="small"><a href="/chats/{{ chat.chat_id }}">← zurück zur Steuerung</a></p>
+      <h1>📜 {{ chat.title }}: Verlauf &amp; Auswertung</h1>
+      <p class="muted small">Aktualisiert sich automatisch · zuletzt <span id="report-updated" class="mono">{{ server_now() | tsfull }}</span></p>
+    </div>
+    <div class="actions">
+      <input type="search" id="report-search" placeholder="🔎 Im Verlauf suchen …" aria-label="Im Verlauf suchen">
+      <label class="small"><input type="checkbox" id="report-notes"> Vermerke zeigen</label>
+    </div>
+  </section>
+  <div id="report-body">{% include "_report_body.html" %}</div>
+</div>
+{% endblock %}

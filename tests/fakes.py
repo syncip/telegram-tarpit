@@ -29,6 +29,9 @@ class FakeClient:
         self.logged_in_user = None
         self.on_login_calls = 0
         self._next_id = 1000
+        self.entities = {}      # Benutzername/ID -> User
+        self.phone_users = {}   # Telefonnummer -> User
+        self.imported = []
 
     async def send_read_acknowledge(self, chat_id):
         self.read.append(chat_id)
@@ -38,13 +41,22 @@ class FakeClient:
         self.typing += 1
         yield
 
-    async def send_message(self, chat_id, text):
+    async def send_message(self, chat_id, text, **kwargs):
         self.sent.append((chat_id, text))
         self._next_id += 1
         return SimpleNamespace(id=self._next_id)
 
     async def __call__(self, request):
+        if type(request).__name__ == "ImportContactsRequest":
+            self.imported.append(request.contacts[0].phone)
+            user = self.phone_users.get(request.contacts[0].phone)
+            return SimpleNamespace(users=[user] if user else [], imported=[])
         self.status_updates.append(request)
+
+    async def get_entity(self, target):
+        if target in self.entities:
+            return self.entities[target]
+        raise ValueError(f"No user has \"{target}\" as username")
 
     async def get_me(self):
         return self.logged_in_user
@@ -102,3 +114,10 @@ class FakeLLM:
     @property
     def reply_calls(self):
         return [c for c in self.calls if "Du analysierst" not in c[0]["content"]]
+
+
+def tg_user(user_id, first_name="Boss", username=None, **flags):
+    """Echtes Telethon-User-Objekt für die Prüfungen in der Engine."""
+    from telethon.tl.types import User
+
+    return User(id=user_id, first_name=first_name, username=username, access_hash=1, **flags)

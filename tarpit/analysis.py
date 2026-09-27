@@ -154,3 +154,43 @@ def response_times(messages: Iterable[Mapping]) -> dict[str, float | None]:
         prev = m
     avg = lambda xs: sum(xs) / len(xs) if xs else None  # noqa: E731
     return {"scammer": avg(scammer), "bait": avg(bait)}
+
+
+# --- Wortwolke (lokal, ohne KI) ------------------------------------------------
+
+STOPWORDS = set("""
+aber alle allem allen aller alles also am an ander andere anderen anderer anderes auch auf aus
+bei beim bin bis bist da dabei damit dann das dass dein deine deinem deinen deiner dem den denn der
+des dessen deshalb dich die dies diese diesem diesen dieser dieses dir doch dort du durch ein eine
+einem einen einer eines einmal er es etwas euch euer eure für gegen gewesen hab habe haben hast hat
+hatte hätte hier hin hinter ich ihm ihn ihnen ihr ihre ihrem ihren ihrer im in indem ins ist ja jede
+jedem jeden jeder jedes jetzt kann kannst kein keine keinem keinen keiner können könnte mal man
+manche mein meine meinem meinen meiner mich mir mit muss musst nach nicht nichts noch nun nur ob
+oder ohne sehr sein seine seinem seinen seiner sich sie sind so solche soll sollte sondern sonst
+über um und uns unser unsere unter viel vom von vor war waren warst was weil weiter welche welchem
+welchen welcher welches wenn wer werde werden wie wieder will wir wird wirst wo wollen wollte würde
+würden zu zum zur zwar zwischen schon gut okay gerne bitte danke hallo hey hi gibt geht mehr ganz
+immer heute morgen einfach wirklich machen mache machst macht gemacht sagen sage sagt weiß wissen
+the and for you your are this that with have has was were but not what all can will just from
+they them their there here then than when where which who why how about into out get got its our
+also only very some any more been being would could should she him her his hers had did does done
+yes yeah hello thanks thank please okay dear know like want need make much many well now today
+""".split())
+
+_WORD_RE = re.compile(r"[a-zäöüß][a-zäöüß\-]{2,}", re.IGNORECASE)
+_PLACEHOLDER_RE = re.compile(r"\[[^\]]*\]")
+
+
+def word_counts(messages: Iterable[Mapping]) -> list[tuple[str, int, int]]:
+    """Häufige Wörter: (Wort, Anzahl Scammer, Anzahl Köder), nach Gesamtzahl sortiert."""
+    them: Counter[str] = Counter()
+    bait: Counter[str] = Counter()
+    for m in messages:
+        if m["sender"] not in ("them", "ai", "me"):
+            continue
+        text = _PLACEHOLDER_RE.sub(" ", m["text"])
+        words = [w.lower().strip("-") for w in _WORD_RE.findall(text)]
+        words = [w for w in words if len(w) >= 3 and w not in STOPWORDS]
+        (them if m["sender"] == "them" else bait).update(words)
+    total = them + bait
+    return [(w, them[w], bait[w]) for w, _ in total.most_common()]

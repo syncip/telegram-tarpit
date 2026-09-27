@@ -65,6 +65,31 @@ CREATE TABLE IF NOT EXISTS events (
     message  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts);
+
+-- Jede Analyse wird aufbewahrt: "Wie war der Stand zu diesem Zeitpunkt?"
+CREATE TABLE IF NOT EXISTS analysis_history (
+    id        INTEGER PRIMARY KEY,
+    chat_id   INTEGER NOT NULL,
+    ts        REAL NOT NULL,
+    basis     INTEGER,
+    messages  INTEGER NOT NULL DEFAULT 0,
+    data      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_history_chat ON analysis_history (chat_id, ts);
+
+-- Weiterleitungen: Scammer will, dass du jemand anderen anschreibst
+CREATE TABLE IF NOT EXISTS referrals (
+    id              INTEGER PRIMARY KEY,
+    source_chat_id  INTEGER NOT NULL,
+    kind            TEXT NOT NULL,      -- username | phone | user_id
+    target          TEXT NOT NULL,
+    target_chat_id  INTEGER,
+    status          TEXT NOT NULL,      -- proposed | pending | contacted | skipped | failed
+    reason          TEXT,
+    created_at      REAL NOT NULL,
+    updated_at      REAL NOT NULL,
+    UNIQUE (source_chat_id, kind, target)
+);
 """
 
 # Spalten, die nach der ersten Version dazugekommen sind (werden per ALTER TABLE ergänzt)
@@ -81,6 +106,8 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "analysis": "TEXT",
         "analysis_at": "REAL",
         "analysis_basis": "INTEGER",
+        "referred_from": "INTEGER",
+        "background": "TEXT",
     },
     "messages": {
         "edited": "INTEGER NOT NULL DEFAULT 0",
@@ -102,6 +129,12 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "quiet_end": "7",         # Stunde, ab der wieder geantwortet wird
     "max_reply_tokens": "300",  # Obergrenze für die Länge einer KI-Antwort
     "auto_analyze": "1",
+    "referral_mode": "auto",        # auto | suggest | off
+    "referral_pause_source": "1",   # alten Chat bei Weiterleitung auf Freigabe stellen
+    "referral_daily_limit": "3",
+    "referral_min_delay": "120",
+    "referral_max_delay": "900",
+    "notify_enabled": "1",
     "analyze_every": "10",     # neue Nachrichten bis zur nächsten automatischen Analyse
 }
 
@@ -109,13 +142,16 @@ OLD_DEFAULTS_V1 = {"history_limit": "40", "analyze_every": "6"}
 
 INT_SETTINGS = {
     "min_delay", "max_delay", "daily_limit", "history_limit", "quiet_start", "quiet_end",
-    "analyze_every",
+    "analyze_every", "max_reply_tokens", "referral_daily_limit", "referral_min_delay",
+    "referral_max_delay",
 }
-BOOL_SETTINGS = {"global_enabled", "auto_analyze"}
+BOOL_SETTINGS = {"global_enabled", "auto_analyze", "referral_pause_source", "notify_enabled"}
+REFERRAL_MODES = ("auto", "suggest", "off")
 
 CHAT_FIELDS = {
     "enabled", "mode", "persona_id", "due_at", "draft_text", "draft_edited", "draft_basis",
-    "draft_at", "instruction", "analysis", "analysis_at", "analysis_basis",
+    "draft_at", "instruction", "analysis", "analysis_at", "analysis_basis", "referred_from",
+    "background",
 }
 
 MAX_EVENTS = 5000
@@ -331,6 +367,82 @@ class Database:
             "SELECT * FROM chats WHERE analysis IS NOT NULL ORDER BY analysis_at DESC"
         ).fetchall()
         return [(row, a) for row in rows if (a := self.analysis(row)) is not None]
+
+    def add_analysis_snapshot(self, chat_id: int, data: dict, basis: int, ts: float | None = None) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO analysis_history (chat_id, ts, basis, messages, data) VALUES (?, ?, ?, ?, ?)",
+                (chat_id, ts or time.time(), basis, self.message_count(chat_id),
+                 json.dumps(data, ensure_ascii=False)),
+            )
+
+    def analysis_history(self, chat_id: int, limit: int = 50) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM analysis_history WHERE chat_id = ? ORDER BY ts DESC, id DESC LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+        result = []
+        for row in rows:
+            try:
+                result.append({**json.loads(row["data"]), "ts": row["ts"], "messages": row["messages"]})
+            except ValueError:
+                continue
+        return result
+
+    # --- Weiterleitungen ---------------------------------------------------
+
+    def add_referral(self, source_chat_id: int, kind: str, target: str, status: str) -> int | None:
+        """Legt eine Weiterleitung an. None, wenn es sie für diesen Chat schon gibt."""
+        now = time.time()
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO referrals (source_chat_id, kind, target, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (source_chat_id, kind, target, status, now, now),
+            )
+        return int(cur.lastrowid) if cur.rowcount else None
+
+    def update_referral(self, referral_id: int, **fields: Any) -> None:
+        unknown = set(fields) - {"status", "reason", "target_chat_id"}
+        if unknown:
+            raise ValueError(f"Unbekannte Felder: {unknown}")
+        assignments = ", ".join(f"{k} = ?" for k in fields)
+        with self.conn:
+            self.conn.execute(
+                f"UPDATE referrals SET {assignments}, updated_at = ? WHERE id = ?",
+                (*fields.values(), time.time(), referral_id),
+            )
+
+    def referral(self, referral_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM referrals WHERE id = ?", (referral_id,)).fetchone()
+
+    def referrals(
+        self, source_chat_id: int | None = None, target_chat_id: int | None = None, limit: int = 100
+    ) -> list[sqlite3.Row]:
+        conditions, params = [], []
+        if source_chat_id is not None:
+            conditions.append("r.source_chat_id = ?")
+            params.append(source_chat_id)
+        if target_chat_id is not None:
+            conditions.append("r.target_chat_id = ?")
+            params.append(target_chat_id)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        return self.conn.execute(
+            f"""SELECT r.*, s.title AS source_title, t.title AS target_title
+                FROM referrals r
+                LEFT JOIN chats s ON s.chat_id = r.source_chat_id
+                LEFT JOIN chats t ON t.chat_id = r.target_chat_id
+                {where} ORDER BY r.created_at DESC LIMIT ?""",
+            (*params, limit),
+        ).fetchall()
+
+    def referrals_contacted_since(self, since: float, exclude_id: int | None = None) -> int:
+        """Wie viele neue Kontakte wurden seit ``since`` angelegt (für das Tageslimit)?"""
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM referrals WHERE status IN ('scheduled', 'drafted', 'contacted') "
+            "AND created_at >= ? AND id != ?",
+            (since, exclude_id or -1),
+        ).fetchone()[0]
 
     # --- Nachrichten -------------------------------------------------------
 

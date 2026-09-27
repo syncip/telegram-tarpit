@@ -4,7 +4,9 @@ from datetime import datetime
 from datetime import date
 
 from tarpit.analysis import keyword_cloud, lexicon_counts, parse_analysis, response_times
-from tarpit.charts import daily_series, grouped_bars, hbars
+from tarpit.charts import daily_series, grouped_bars, hbars, word_cloud
+from tarpit.analysis import word_counts
+from tarpit.referrals import extract_candidates
 from tarpit.prompts import build_messages
 from tarpit.safety import check_reply, clean_reply, split_reply
 from tarpit.timing import in_quiet_hours, postpone_quiet_hours, sample_delay, typing_duration, typing_plan
@@ -147,3 +149,31 @@ def test_charts_render():
     assert "bar s-them" in svg and "bar s-ai" in svg
     assert "Leer" in hbars([], "T", "s-ai", "Leer")
     assert "width:100.0%" in hbars([("a", 10, "10"), ("b", 5, "5")], "T", "s-ai", "")
+
+
+
+def test_extract_candidates():
+    found = extract_candidates(
+        "Schreib meinem Manager @AnnaInvest oder https://t.me/crypto_boss, Tel +44 7911 123456. "
+        "Gruppe: t.me/+abc t.me/joinchat/xyz, Bot @helpbot, Mail a@b.de, Betrag 1.000.000"
+    )
+    assert [(c.kind, c.value) for c in found] == [
+        ("username", "annainvest"), ("username", "crypto_boss"), ("phone", "+447911123456"),
+    ]
+    assert extract_candidates("0049 171 2345678")[0].value == "+491712345678"
+    assert extract_candidates("hallo, wie gehts?") == []
+
+
+def test_word_counts_and_cloud():
+    msgs = [
+        {"sender": "them", "text": "Bitcoin Bitcoin Rendite [Foto] und die Rendite"},
+        {"sender": "ai", "text": "bitcoin? brille brille brille"},
+        {"sender": "note", "text": "Bitcoin intern"},
+    ]
+    counts = word_counts(msgs)
+    assert ("bitcoin", 2, 1) in counts and ("brille", 0, 3) in counts
+    assert not any(w in ("und", "die", "foto", "intern") for w, *_ in counts)
+    html = word_cloud(counts, "leer")
+    assert "w-them" in html and "w-ai" in html and "Rendite".lower() in html
+    assert html.index("bitcoin") >= 0 and word_cloud([], "leer").endswith("leer</p>")
+    assert word_cloud(counts, "x") == word_cloud(counts, "x")  # stabile Anordnung

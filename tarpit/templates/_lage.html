@@ -1,0 +1,67 @@
+    <section class="card">
+      <div class="row between">
+        <h2 class="flush">🧭 Lage</h2>
+        <form method="post" action="/chats/{{ chat.chat_id }}/summary">
+          <input type="hidden" name="next" value="{{ next_url or ('/chats/' ~ chat.chat_id) }}">
+          <button class="btn small" title="Aktuellen Stand zusammenfassen (ein KI-Aufruf). Wird mit Zeitstempel gespeichert.">📝 Kurzzusammenfassung</button>
+        </form>
+      </div>
+      {% if analyzing %}<p class="chip busy">✍️ Zusammenfassung wird erstellt …</p>{% endif %}
+      {% if analysis %}
+        <p><span class="chip">{{ analysis.scam_type }}</span> <strong class="small">Phase {{ analysis.stage }}: {{ stages[analysis.stage - 1] }}</strong> <span class="muted small">· Stand {{ chat.analysis_at | ago }}</span></p>
+        <ol class="stages">
+          {% for name in stages_short %}
+          <li class="{{ 'done' if loop.index < analysis.stage else ('current' if loop.index == analysis.stage else '') }}" data-tip="Phase {{ loop.index }}: {{ stages[loop.index0] }}">{{ name }}</li>
+          {% endfor %}
+        </ol>
+        <p>{{ analysis.summary }}</p>
+        {% if analysis.scammer_goal %}<p class="small"><strong>🎣 Scammer will:</strong> {{ analysis.scammer_goal }}</p>{% endif %}
+        {% if analysis.bait_tactic %}<p class="small"><strong>🤖 KI hält hin mit:</strong> {{ analysis.bait_tactic }}</p>{% endif %}
+        <div class="meter-row" data-tip="Wie genervt wirkt der Scammer? {{ analysis.frustration }} von 10">
+          <span class="small">Frust-Level</span>
+          <div class="meter"><div class="meter-fill" style="width: {{ analysis.frustration * 10 }}%"></div></div>
+          <span class="small mono">{{ analysis.frustration }}/10</span>
+        </div>
+        {% if analysis.keywords %}
+        <p class="small"><strong>Schlagworte:</strong><br>
+          {% for kw in analysis.keywords %}<span class="chip">{{ kw }}</span> {% endfor %}
+        </p>
+        {% endif %}
+        {% if analysis.best_of %}
+        <h3>⭐ Best-of</h3>
+        {% for q in analysis.best_of %}
+          <blockquote class="quote {{ q.sender }}">{{ q.text }}<footer>{{ '🎣 Scammer' if q.sender == 'them' else '🤖 Köder' }}</footer></blockquote>
+        {% endfor %}
+        {% endif %}
+      {% else %}
+        <p class="muted">Noch keine Analyse. Sie entsteht automatisch alle {{ settings.analyze_every }} Nachrichten{% if not settings.auto_analyze %} (derzeit ausgeschaltet){% endif %}, oder per Knopf.</p>
+      {% endif %}
+    </section>
+
+{% if referrals_out or referrals_in %}
+<section class="card">
+  <h2 class="flush">↪ Weiterleitungen</h2>
+  <ul class="referrals">
+    {% for r in referrals_in %}
+      <li>Vermittelt von <a href="/chats/{{ r.source_chat_id }}">{{ r.source_title or r.source_chat_id }}</a> ({{ candidate_label(r) }})</li>
+    {% endfor %}
+    {% for r in referrals_out %}
+      <li class="ref-{{ r.status }}">
+        <strong>{{ candidate_label(r) }}</strong>
+        <span class="chip">{{ {'proposed': '❓ wartet auf dich', 'pending': '⏳ in Arbeit', 'scheduled': '⏳ erste Nachricht geplant',
+                               'drafted': '👀 erste Nachricht wartet auf Freigabe', 'contacted': '✅ angeschrieben',
+                               'skipped': '⏭ übersprungen', 'failed': '❌ fehlgeschlagen'}.get(r.status, r.status) }}</span>
+        {% if r.target_chat_id %}→ <a href="/chats/{{ r.target_chat_id }}">{{ r.target_title or 'neuer Chat' }}</a>{% endif %}
+        {% if r.reason and r.status in ('skipped', 'failed') %}<div class="muted small">{{ r.reason }}</div>{% endif %}
+        {% if r.status == 'proposed' %}
+        <div class="row">
+          <form method="post" action="/referrals/{{ r.id }}/accept"><input type="hidden" name="next" value="/chats/{{ chat.chat_id }}"><button class="btn small primary">Anschreiben</button></form>
+          <form method="post" action="/referrals/{{ r.id }}/ignore"><input type="hidden" name="next" value="/chats/{{ chat.chat_id }}"><button class="btn small">Ignorieren</button></form>
+        </div>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+

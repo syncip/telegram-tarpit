@@ -34,7 +34,11 @@
       <tr><th>Geplante Antworten</th><td>{{ health.timers }}</td></tr>
       <tr><th>Entwürfe in Arbeit</th><td>{{ health.drafting }}</td></tr>
       <tr><th>Tippt gerade</th><td>{{ health.sending }}</td></tr>
+      <tr><th>Benachrichtigungen</th><td>{{ health.notify_channel }}{% if health.notify_error %}<br><span class="small err">{{ health.notify_error }}</span>{% endif %}</td></tr>
     </table>
+    <form method="post" action="/logs/test-notify" class="row">
+      <button class="btn">🔔 Test-Benachrichtigung senden</button>
+    </form>
   </div>
 </section>
 

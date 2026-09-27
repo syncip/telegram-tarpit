@@ -110,7 +110,8 @@ def test_requires_auth(client):
 
 
 def test_pages_render(client):
-    for url in ["/", "/chats/1", "/chats/1/messages", "/personas", "/personas?edit=1", "/settings",
+    for url in ["/", "/chats/1", "/chats/1/messages", "/chats/1/verlauf", "/chats/1/verlauf/body",
+                "/chats/1/lage", "/personas", "/personas?edit=1", "/settings",
                 "/logs", "/logs?level=problems", "/logs?source=llm&chat=1", "/logs/rows"]:
         r = client.get(url)
         assert r.status_code == 200, url
@@ -268,3 +269,58 @@ def test_qr_page_while_login_completes(client):
     assert r.status_code == 200 and "Anmeldung wird abgeschlossen" in r.text
     client.get("/login")  # darf den laufenden Login nicht abbrechen
     assert t.qr_state == "done"
+
+
+
+def test_report_page_with_cloud_and_summary_history(client):
+    d = engine(client).db
+    for i in range(3):
+        d.add_message(CHAT, "them", f"Bitcoin Rendite garantiert Nummer {i}", time.time() + i)
+        d.add_message(CHAT, "ai", "bitcoin? ist das mit münzen", time.time() + i + 0.5)
+    page = client.get("/chats/1/verlauf").text
+    assert "Wortwolke" in page and "bitcoin" in page and "w-them" in page
+    assert "Gesamter Verlauf (7 Nachrichten)" in page and "Noch keine. Klick" in page
+
+    client.post("/chats/1/enabled", data={"value": "1"})
+    client.post("/chats/1/mode", data={"mode": "manual"})
+    r = client.post("/chats/1/summary", data={"next": "/chats/1/verlauf"}, follow_redirects=False)
+    assert r.headers["location"] == "/chats/1/verlauf"
+    wait_idle(client)
+    page = client.get("/chats/1/verlauf").text
+    assert "Frühere Zusammenfassungen" in page and "nach 7 Nachrichten" in page
+    assert "Der Scammer bietet Bitcoin-Rendite an" in page
+    assert "Verlauf &amp; Auswertung" in client.get("/chats/1").text  # Link auf der Chat-Seite
+    assert "Wortwolke aller KI-Chats" in client.get("/").text
+
+
+def test_referral_buttons(client):
+    t = engine(client)
+    d = t.db
+    d.update_chat(CHAT, enabled=True, mode="manual")  # im Modus "nur ich": nur vorschlagen
+    t.client.entities["crypto_boss"] = __import__("tests.fakes", fromlist=["tg_user"]).tg_user(555, "Boss", "crypto_boss")
+    d.add_message(CHAT, "them", "schreib @crypto_boss")
+    from tarpit.referrals import extract_candidates
+
+    async def detect():  # läuft in der Event-Loop der App, wie im echten Betrieb
+        return t.on_referral_candidates(CHAT, extract_candidates("schreib @crypto_boss"))
+
+    ids = client.portal.call(detect)
+    wait_idle(client)
+    assert d.referral(ids[0])["status"] == "proposed"
+    page = client.get("/chats/1").text
+    assert "@crypto_boss" in page and "Anschreiben" in page
+    assert "Weiterleitungen" in client.get("/").text
+    client.post(f"/referrals/{ids[0]}/accept", data={"next": "/chats/1"})
+    assert d.referral(ids[0])["status"] == "scheduled"
+    assert "vermittelt" in client.get("/chats/555").text
+    assert client.post("/referrals/9999/ignore").status_code == 404
+
+
+def test_referral_settings_and_test_notification(client):
+    client.post("/settings", data={"referral_mode": "suggest", "referral_daily_limit": "5",
+                                   "referral_pause_source": "1", "notify_enabled": "1"})
+    s = engine(client).db.settings()
+    assert s["referral_mode"] == "suggest" and s["referral_daily_limit"] == 5
+    assert s["referral_pause_source"] is True and s["max_reply_tokens"] == 300
+    client.post("/logs/test-notify")
+    assert any(chat == "me" and "Test" in text for chat, text in engine(client).client.sent)

@@ -31,6 +31,26 @@
     <label>Nachrichten Kontext für die KI <input type="number" name="history_limit" value="{{ settings.history_limit }}"></label>
     <p class="muted small">Weniger Kontext = weniger Token pro Antwort. Das Fenster rückt in 10er-Schritten weiter, damit Prompt-Caching greift.</p>
   </fieldset>
+  <fieldset>
+    <legend>Weiterleitungen („Schreib meinem Manager @…“, „Adde sie“)</legend>
+    <label>Wenn ein Scammer dich an jemand Neues verweist
+      <select name="referral_mode">
+        <option value="auto" {{ 'selected' if settings.referral_mode == 'auto' }}>automatisch anschreiben</option>
+        <option value="suggest" {{ 'selected' if settings.referral_mode == 'suggest' }}>nur vorschlagen, ich entscheide</option>
+        <option value="off" {{ 'selected' if settings.referral_mode == 'off' }}>ignorieren</option>
+      </select>
+    </label>
+    <label class="check"><input type="checkbox" name="referral_pause_source" value="1" {{ 'checked' if settings.referral_pause_source }}> Den alten Chat dann auf „KI schlägt vor“ stellen (wartet auf deine Freigabe)</label>
+    <label>Max. neue Kontakte pro 24 h <input type="number" name="referral_daily_limit" min="0" value="{{ settings.referral_daily_limit }}"></label>
+    <label>Erste Nachricht frühestens nach (Sekunden) <input type="number" name="referral_min_delay" value="{{ settings.referral_min_delay }}"></label>
+    <label>… spätestens nach (Sekunden) <input type="number" name="referral_max_delay" value="{{ settings.referral_max_delay }}"></label>
+    <p class="muted small">Zum Schutz werden nie Personen aus deinen Kontakten oder aus bestehenden Chats angeschrieben. Telegram bremst Accounts, die viele Fremde anschreiben. Deshalb gibt es ein niedriges Limit.</p>
+  </fieldset>
+  <fieldset>
+    <legend>Benachrichtigungen</legend>
+    <label class="check"><input type="checkbox" name="notify_enabled" value="1" {{ 'checked' if settings.notify_enabled }}> Mich per Telegram benachrichtigen, wenn eine Weiterleitung erkannt wird</label>
+    <p class="muted small">Kanal: {{ notify_channel }}. Für Push-Benachrichtigungen einen eigenen Bot bei @BotFather anlegen und <code>NOTIFY_BOT_TOKEN</code> in der <code>.env</code> setzen (siehe README).</p>
+  </fieldset>
   <button class="btn primary">Speichern</button>
 </form>
 {% endblock %}

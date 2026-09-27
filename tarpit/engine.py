@@ -33,7 +33,9 @@ from .analysis import build_analysis_messages, parse_analysis
 from .config import Config
 from .db import Database
 from .llm import LLMClient, LLMError
-from .prompts import SKIP_TOKEN, build_messages
+from .notify import Notifier
+from .prompts import SKIP_TOKEN, build_messages, build_opening_messages
+from .referrals import Candidate, extract_candidates, normalize_phone
 from .safety import check_reply, clean_reply, split_reply
 from .timing import postpone_quiet_hours, sample_delay, typing_plan
 
@@ -71,10 +73,30 @@ def describe_message(msg: Message) -> str:
         kind = "[Video]"
     elif msg.photo:
         kind = "[Foto]"
+    elif msg.contact:
+        c = msg.contact
+        name = " ".join(filter(None, [c.first_name, c.last_name]))
+        kind = f"[Kontakt: {name} {c.phone_number or ''}]".replace("  ", " ")
     elif msg.document:
         kind = "[Datei]"
     parts = [p for p in (kind, msg.message) if p]
     return " ".join(parts) or "[Nachricht ohne Text]"
+
+
+def message_entity_candidates(msg: Message) -> list[Candidate]:
+    """Weiterleitungen, die nicht im Text stehen: Erwähnung mit Nutzer-ID, Link hinter Text, geteilter Kontakt."""
+    found: list[Candidate] = []
+    for entity in msg.entities or []:
+        if isinstance(entity, types.MessageEntityMentionName):
+            found.append(Candidate("user_id", str(entity.user_id)))
+        elif isinstance(entity, types.MessageEntityTextUrl):
+            found.extend(extract_candidates(entity.url))
+    if msg.contact:
+        if msg.contact.user_id:
+            found.append(Candidate("user_id", str(msg.contact.user_id)))
+        elif msg.contact.phone_number and (phone := normalize_phone("+" + msg.contact.phone_number.lstrip("+"))):
+            found.append(Candidate("phone", phone))
+    return found
 
 
 _CODE_TYPES = {
@@ -114,6 +136,7 @@ class Tarpit:
         self.db = db
         self.client = TelegramClient(str(config.session_path), config.api_id, config.api_hash)
         self.llm = LLMClient(config.llm_base_url, config.llm_api_key)
+        self.notifier = Notifier(config.notify_bot_token, config.notify_chat_id, config.public_url)
         self.me: User | None = None
         self.rng = random.Random()
         # laufende Hintergrund-Aufgaben pro Chat
@@ -331,6 +354,7 @@ class Tarpit:
                 task.cancel()
             tasks.clear()
         await self.llm.aclose()
+        await self.notifier.aclose()
         await self.client.disconnect()
 
     # --- Synchronisation ---------------------------------------------------
@@ -360,19 +384,30 @@ class Tarpit:
 
     # --- Telegram-Events ---------------------------------------------------
 
+    def _is_own_chat(self, chat_id: int) -> bool:
+        return self.me is not None and chat_id == self.me.id
+
     async def _on_incoming(self, event: events.NewMessage.Event) -> None:
+        if self._is_own_chat(event.chat_id):
+            return
         sender = await event.get_sender()
         if not isinstance(sender, User) or sender.bot:
             return
         msg: Message = event.message
         self.db.upsert_chat(event.chat_id, display_name(sender), sender.username, msg.date.timestamp())
         self.db.add_message(event.chat_id, "them", describe_message(msg), msg.date.timestamp(), msg.id)
+        candidates = extract_candidates(msg.message or "") + message_entity_candidates(msg)
+        if candidates:
+            # vor der normalen Antwortplanung, damit der Chat ggf. zuerst auf Freigabe gestellt wird
+            self.on_referral_candidates(event.chat_id, candidates)
         self.on_scammer_message(event.chat_id)
 
     async def _on_outgoing(self, event: events.NewMessage.Event) -> None:
         # Von der KI gesendete Nachrichten landen auch hier. Kurz warten, bis
         # _send_reply sie gespeichert hat, und nur echte manuelle Nachrichten
         # (z. B. vom Handy) als 'me' übernehmen.
+        if self._is_own_chat(event.chat_id):
+            return  # z. B. Benachrichtigungen in "Gespeicherte Nachrichten"
         await asyncio.sleep(2)
         msg: Message = event.message
         if self.db.has_tg_message(event.chat_id, msg.id):
@@ -408,7 +443,13 @@ class Tarpit:
         chat = self.db.chat(chat_id)
         if not self.is_active(chat) or chat["mode"] == "manual":
             return
-        if self.db.last_sender(chat_id) != "them":
+        last = self.db.last_sender(chat_id)
+        if last is None and chat["draft_text"]:
+            # neuer Kontakt aus einer Weiterleitung: erste Nachricht steht bereit
+            if chat["mode"] == "auto":
+                self.ensure_due(chat_id)
+            return
+        if last != "them":
             if chat["due_at"]:
                 self.db.update_chat(chat_id, due_at=None)
             return
@@ -452,8 +493,13 @@ class Tarpit:
         try:
             await self._send_reply(chat_id, instant)
         except Exception as exc:
-            _log(logging.ERROR, "engine", "Antwort fehlgeschlagen: %s", exc, chat_id=chat_id, exc_info=True)
-            self.db.add_message(chat_id, "note", f"Fehler beim Senden: {exc}")
+            if type(exc).__name__ == "PeerFloodError":
+                message = ("Telegram hat das Anschreiben neuer Kontakte vorübergehend gesperrt (Spam-Schutz). "
+                           "Bitte ein paar Stunden warten.")
+            else:
+                message = f"Fehler beim Senden: {exc}"
+            _log(logging.ERROR, "engine", "%s", message, chat_id=chat_id, exc_info=True)
+            self.db.add_message(chat_id, "note", message)
             self.db.update_chat(chat_id, due_at=None)
 
     def reply_now(self, chat_id: int) -> None:
@@ -569,7 +615,9 @@ class Tarpit:
         if not history:
             return None
         basis = self.db.last_message_id(chat_id)
-        text = await self._generate(chat_id, persona["prompt"], history, settings, chat["instruction"])
+        text = await self._generate(
+            chat_id, persona["prompt"], history, settings, chat["instruction"], chat["background"]
+        )
         if text is None:
             self.draft_failed[chat_id] = basis
             return None
@@ -610,7 +658,9 @@ class Tarpit:
             return False
         if not instant:
             # automatischer Versand nur, wenn weiterhin alles passt
-            if not self.is_active(chat) or chat["mode"] != "auto" or self.db.last_sender(chat_id) != "them":
+            last = self.db.last_sender(chat_id)
+            opening = last is None and bool(chat["draft_text"])
+            if not self.is_active(chat) or chat["mode"] != "auto" or (last != "them" and not opening):
                 self.db.update_chat(chat_id, due_at=None)
                 return False
             settings = self.db.settings()
@@ -675,6 +725,9 @@ class Tarpit:
                 chat_id, due_at=None, draft_text=None, draft_edited=0, draft_basis=None,
                 draft_at=None, instruction=None,
             )
+            for ref in self.db.referrals(target_chat_id=chat_id):
+                if ref["status"] in ("scheduled", "drafted"):
+                    self.db.update_referral(ref["id"], status="contacted", reason="erste Nachricht gesendet")
         finally:
             self.sending.discard(chat_id)
             if sent_any:
@@ -702,9 +755,13 @@ class Tarpit:
             pass
 
     async def _generate(
-        self, chat_id: int, persona_prompt: str, history, settings, instruction: str | None = None
+        self, chat_id: int, persona_prompt: str, history, settings, instruction: str | None = None,
+        background: str | None = None,
     ) -> str | None:
-        messages = build_messages(persona_prompt, history, instruction=instruction)
+        messages = build_messages(persona_prompt, history, instruction=instruction, background=background)
+        return await self._generate_from(chat_id, messages, settings)
+
+    async def _generate_from(self, chat_id: int, messages: list[dict[str, str]], settings) -> str | None:
         for attempt in range(1, 3):
             try:
                 result = await self.llm.complete(
@@ -763,10 +820,12 @@ class Tarpit:
             model = settings["analysis_model"] or settings["model"]
             result = await self.llm.complete(model, build_analysis_messages(history), 0.3, max_tokens=700)
             data = parse_analysis(result.text)
+            now = time.time()
             self.db.update_chat(
-                chat_id, analysis=json.dumps(data, ensure_ascii=False), analysis_at=time.time(),
+                chat_id, analysis=json.dumps(data, ensure_ascii=False), analysis_at=now,
                 analysis_basis=basis,
             )
+            self.db.add_analysis_snapshot(chat_id, data, basis, now)
             _log(logging.INFO, "llm", "Analyse aktualisiert: %s, Phase %d (%s)", data["scam_type"],
                  data["stage"], result.usage.describe(), chat_id=chat_id)
         except LLMError as exc:
@@ -776,6 +835,166 @@ class Tarpit:
         finally:
             if self.analyzing.get(chat_id) is asyncio.current_task():
                 del self.analyzing[chat_id]
+
+    # --- Weiterleitungen ("Adde sie", "Schreib meinem Manager") ---------------
+
+    def on_referral_candidates(self, chat_id: int, candidates: list[Candidate]) -> list[int]:
+        """Scammer will, dass du jemand anderen anschreibst. Gibt die neuen Weiterleitungs-IDs zurück."""
+        chat = self.db.chat(chat_id)
+        settings = self.db.settings()
+        if not self.is_active(chat) or settings["referral_mode"] == "off":
+            return []
+        auto = settings["referral_mode"] == "auto" and chat["mode"] != "manual"
+        new_ids = []
+        for candidate in candidates:
+            ref_id = self.db.add_referral(chat_id, candidate.kind, candidate.value,
+                                          "pending" if auto else "proposed")
+            if ref_id is not None:
+                new_ids.append(ref_id)
+        if not new_ids:
+            return []
+        labels = ", ".join(c.label for c in candidates)
+        _log(logging.WARNING, "engine", "Weiterleitung erkannt: soll %s anschreiben", labels, chat_id=chat_id)
+        self.db.add_message(chat_id, "note", f"↪ Weiterleitung erkannt: {labels}")
+        paused = False
+        if settings["referral_pause_source"] and chat["mode"] == "auto":
+            self.set_mode(chat_id, "review")
+            paused = True
+        asyncio.create_task(self._process_referrals(chat_id, new_ids, auto, paused))
+        return new_ids
+
+    async def _process_referrals(self, chat_id: int, ref_ids: list[int], auto: bool, paused: bool) -> None:
+        chat = self.db.chat(chat_id)
+        lines = [f"„{chat['title']}“ möchte, dass du jemand Neues anschreibst."]
+        if paused:
+            lines.append("⏸ Der Chat wartet jetzt auf deine Freigabe (Modus „KI schlägt vor“).")
+        for ref_id in ref_ids:
+            ref = self.db.referral(ref_id)
+            label = Candidate(ref["kind"], ref["target"]).label
+            if auto:
+                try:
+                    lines.append(await self.contact_referral(ref_id))
+                except Exception as exc:
+                    _log(logging.ERROR, "engine", "Weiterleitung an %s fehlgeschlagen: %s", label, exc,
+                         chat_id=chat_id, exc_info=True)
+                    self.db.update_referral(ref_id, status="failed", reason=str(exc))
+                    lines.append(f"❌ {label}: {exc}")
+            else:
+                lines.append(f"❓ {label}: wartet auf deine Entscheidung (anschreiben oder ignorieren)")
+        if self.db.settings()["notify_enabled"]:
+            text = "\n".join(lines) + self.notifier.link(f"/chats/{chat_id}")
+            await self.notifier.send(self.client, self.me.id if self.me else None, text)
+
+    async def accept_referral(self, ref_id: int) -> str:
+        """Du hast eine vorgeschlagene Weiterleitung bestätigt."""
+        return await self.contact_referral(ref_id, approved=True)
+
+    def ignore_referral(self, ref_id: int) -> None:
+        self.db.update_referral(ref_id, status="skipped", reason="von dir ignoriert")
+
+    async def contact_referral(self, ref_id: int, approved: bool = False) -> str:
+        """Legt den neuen Kontakt an und bereitet die erste Nachricht vor. Gibt eine Statuszeile zurück."""
+        ref = self.db.referral(ref_id)
+        source = self.db.chat(ref["source_chat_id"])
+        settings = self.db.settings()
+        label = Candidate(ref["kind"], ref["target"]).label
+
+        def skip(reason: str, status: str = "skipped", target_chat_id: int | None = None) -> str:
+            fields = {"status": status, "reason": reason}
+            if target_chat_id is not None:
+                fields["target_chat_id"] = target_chat_id
+            self.db.update_referral(ref_id, **fields)
+            _log(logging.WARNING, "engine", "Weiterleitung an %s nicht ausgeführt: %s", label, reason,
+                 chat_id=source["chat_id"])
+            return f"⏭ {label}: {reason}"
+
+        recent = self.db.referrals_contacted_since(time.time() - 86400, exclude_id=ref_id)
+        if not approved and recent >= settings["referral_daily_limit"]:
+            return skip(f"Tageslimit von {settings['referral_daily_limit']} neuen Kontakten erreicht")
+
+        entity, imported = await self._resolve_referral(ref)
+        if entity is None:
+            return skip("nicht bei Telegram gefunden", status="failed")
+        if not isinstance(entity, User) or entity.bot or entity.deleted or entity.is_self:
+            return skip("kein normaler Nutzer (Bot, Kanal oder Gruppe)")
+        if entity.id == source["chat_id"]:
+            return skip("das ist der Scammer selbst")
+        existing = self.db.chat(entity.id)
+        if existing is not None and existing["enabled"]:
+            return skip("wird bereits von der KI bearbeitet", target_chat_id=entity.id)
+        if existing is not None and self.db.message_count(entity.id) > 0:
+            return skip("bestehender Chat, wird zum Schutz nicht angeschrieben")
+        if entity.contact and not imported:
+            return skip("steht in deinen Kontakten, wird zum Schutz nicht angeschrieben")
+
+        send_auto = approved or settings["referral_mode"] == "auto"
+        self.db.upsert_chat(entity.id, display_name(entity), entity.username, time.time())
+        self.db.update_chat(
+            entity.id, enabled=True, mode="auto" if send_auto else "review",
+            persona_id=source["persona_id"], referred_from=source["chat_id"],
+            background=self._referral_background(source),
+        )
+        self.db.update_referral(ref_id, target_chat_id=entity.id, status="pending")
+        text = await self._make_opening(entity.id, source["title"], label)
+        if text is None:
+            self.db.update_referral(ref_id, status="failed", reason="erste Nachricht konnte nicht erzeugt werden")
+            return f"❌ {label}: erste Nachricht konnte nicht erzeugt werden"
+        self.db.add_message(source["chat_id"], "note", f"↪ Neuer Chat mit {display_name(entity)} ({label}) angelegt")
+        if send_auto:
+            due = time.time() + self.rng.uniform(settings["referral_min_delay"], settings["referral_max_delay"])
+            self.db.update_chat(entity.id, due_at=due)
+            self.ensure_due(entity.id)
+            self.db.update_referral(ref_id, status="scheduled", reason="erste Nachricht geplant")
+            when = datetime.fromtimestamp(due).strftime("%H:%M:%S")
+            _log(logging.INFO, "engine", "Weiterleitung an %s: erste Nachricht geplant um %s", label, when,
+                 chat_id=entity.id)
+            return f"✅ {label}: neuer Chat angelegt, erste Nachricht um {when}"
+        self.db.update_referral(ref_id, status="drafted", reason="erste Nachricht wartet auf Freigabe")
+        return f"👀 {label}: neuer Chat angelegt, erste Nachricht wartet auf deine Freigabe"
+
+    async def _resolve_referral(self, ref) -> tuple[object | None, bool]:
+        """Findet den Telegram-Nutzer. Telefonnummern werden dafür als Kontakt importiert."""
+        kind, target = ref["kind"], ref["target"]
+        if kind == "phone":
+            source = self.db.chat(ref["source_chat_id"])
+            result = await self.client(functions.contacts.ImportContactsRequest([
+                types.InputPhoneContact(
+                    client_id=self.rng.randrange(1, 2**31), phone=target,
+                    first_name="🕸 Tarpit", last_name=f"via {source['title']}"[:60],
+                )
+            ]))
+            users = getattr(result, "users", None) or []
+            return (users[0] if users else None), True
+        try:
+            return await self.client.get_entity(int(target) if kind == "user_id" else target), False
+        except (ValueError, TypeError):
+            return None, False
+
+    def _referral_background(self, source) -> str:
+        analysis = self.db.analysis(source)
+        if analysis and analysis.get("summary"):
+            story = f"{analysis['scam_type']}: {analysis['summary']}"
+        else:
+            lines = [
+                f"{'Scammer' if m['sender'] == 'them' else 'Du'}: {m['text']}"
+                for m in self.db.messages(source["chat_id"], limit=8, include_notes=False)
+            ]
+            story = " / ".join(lines)
+        return (f"„{source['title']}“ hat dich an diese Person verwiesen. "
+                f"Bisheriger Stand mit „{source['title']}“: {story}")[:900]
+
+    async def _make_opening(self, chat_id: int, source_title: str, target_label: str) -> str | None:
+        chat = self.db.chat(chat_id)
+        persona = self.db.persona_for_chat(chat)
+        if persona is None:
+            return None
+        messages = build_opening_messages(persona["prompt"], chat["background"], source_title, target_label)
+        text = await self._generate_from(chat_id, messages, self.db.settings())
+        if text is None or text.strip() == SKIP_TOKEN:
+            return None
+        self.db.update_chat(chat_id, draft_text=text, draft_edited=0, draft_basis=0, draft_at=time.time())
+        _log(logging.INFO, "llm", "Erste Nachricht für neuen Kontakt erstellt", chat_id=chat_id)
+        return text
 
     # --- Status ----------------------------------------------------------------
 
@@ -803,6 +1022,7 @@ class Tarpit:
             "daily_limit": settings["daily_limit"],
             "last_msg_id": self.db.last_message_id(chat_id, include_notes=True),
             "analysis_at": chat["analysis_at"],
+            "referred_from": chat["referred_from"],
         }
 
     def health(self) -> dict:
@@ -818,6 +1038,8 @@ class Tarpit:
             "drafting": sum(1 for t in self.drafting.values() if not t.done()),
             "sending": len(self.sending),
             "problems_24h": self.db.problem_count(time.time() - 86400),
+            "notify_channel": self.notifier.channel,
+            "notify_error": self.notifier.last_error,
         }
 
     async def test_model(self) -> tuple[bool, str]:

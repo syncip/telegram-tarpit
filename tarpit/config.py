@@ -24,6 +24,9 @@ class Config:
     data_dir: Path
     host: str
     port: int
+    notify_bot_token: str = ""
+    notify_chat_id: str = ""
+    public_url: str = ""
 
     @property
     def session_path(self) -> Path:
@@ -65,4 +68,7 @@ def load_config() -> Config:
         data_dir=data_dir,
         host=os.environ.get("HOST", "127.0.0.1"),
         port=int(os.environ.get("PORT", "8080")),
+        notify_bot_token=os.environ.get("NOTIFY_BOT_TOKEN", "").strip(),
+        notify_chat_id=os.environ.get("NOTIFY_CHAT_ID", "").strip(),
+        public_url=os.environ.get("PUBLIC_URL", "").strip(),
     )

@@ -12,7 +12,8 @@ from tarpit.config import Config
 from tarpit.db import Database
 from tarpit.engine import Tarpit
 
-from .fakes import ME, FakeClient, FakeLLM
+from .fakes import ME, FakeClient, FakeLLM, tg_user
+from tarpit.referrals import extract_candidates
 
 CHAT = 7
 
@@ -361,3 +362,132 @@ def test_reply_now_does_not_wait_for_later_draft(tmp_path):
     finally:
         engine_mod.typing_plan = engine_mod_typing
     assert sent_texts(t) == ["ach herrje, wie geht das denn?"]
+
+
+
+# --- Weiterleitungen ----------------------------------------------------------------
+
+BOSS = 555
+
+
+def scammer_refers(t, db, text):
+    db.add_message(CHAT, "them", text)
+    t.on_referral_candidates(CHAT, extract_candidates(text))
+    t.on_scammer_message(CHAT)
+
+
+@pytest.fixture
+def ref_setup(setup):
+    t, db = setup
+    t.client.entities["crypto_boss"] = tg_user(BOSS, "Mr. Boss", "crypto_boss")
+    db.set_setting("referral_min_delay", 60)
+    db.set_setting("referral_max_delay", 120)
+    return t, db
+
+
+def test_referral_pauses_source_creates_chat_and_notifies(ref_setup, monkeypatch):
+    t, db = ref_setup
+    started = []
+    monkeypatch.setattr(t, "_start_timer", lambda chat_id, due, instant=False: started.append((chat_id, due)))
+    run(lambda: scammer_refers(t, db, "Bitte schreib meinem Manager @crypto_boss, er hilft dir"))
+
+    assert db.chat(CHAT)["mode"] == "review"  # alter Chat wartet auf Freigabe
+    assert not any(cid == CHAT for cid, _ in started)  # dort keine automatische Antwort
+    new = db.chat(BOSS)
+    assert new["enabled"] == 1 and new["mode"] == "auto" and new["referred_from"] == CHAT
+    assert "Scam" in new["background"]
+    assert new["draft_text"] == "ach herrje, wie geht das denn?"
+    assert 60 <= new["due_at"] - time.time() <= 121 and started[-1][0] == BOSS
+    ref = db.referrals(source_chat_id=CHAT)[0]
+    assert ref["status"] == "scheduled" and ref["target_chat_id"] == BOSS
+    opening_prompt = next(c for c in t.llm.reply_calls if "@crypto_boss" in c[-1]["content"])
+    assert "Hintergrund" in opening_prompt[0]["content"] and "Scam" in opening_prompt[-1]["content"]
+
+    notes = [m["text"] for m in db.messages(CHAT) if m["sender"] == "note"]
+    assert any("Weiterleitung erkannt" in n for n in notes) and any("Neuer Chat" in n for n in notes)
+    me_msgs = [text for chat, text in t.client.sent if chat == "me"]
+    assert len(me_msgs) == 1 and "wartet jetzt auf deine Freigabe" in me_msgs[0] and "@crypto_boss" in me_msgs[0]
+
+
+def test_referral_opening_is_sent_and_marked(ref_setup):
+    t, db = ref_setup
+    run(lambda: scammer_refers(t, db, "adde ihn: t.me/crypto_boss"))
+    assert (BOSS, "ach herrje, wie geht das denn?") in t.client.sent
+    assert db.referrals(source_chat_id=CHAT)[0]["status"] == "contacted"
+    assert db.last_sender(BOSS) == "ai"
+    # die gleiche Weiterleitung nochmal: kein zweiter Kontakt
+    before = len(t.client.sent)
+    run(lambda: scammer_refers(t, db, "hast du @crypto_boss schon geschrieben?"))
+    assert len(db.referrals(source_chat_id=CHAT)) == 1
+    assert len(t.client.sent) == before  # alter Chat steht auf Freigabe: nichts automatisch gesendet
+    assert db.chat(CHAT)["draft_text"]  # aber ein Entwurf liegt bereit
+
+
+@pytest.mark.parametrize("entity,reason", [
+    (tg_user(BOSS, contact=True), "Kontakten"),
+    (tg_user(BOSS, bot=True), "kein normaler Nutzer"),
+    (tg_user(CHAT), "Scammer selbst"),
+])
+def test_referral_safety_rules(ref_setup, entity, reason):
+    t, db = ref_setup
+    t.client.entities["crypto_boss"] = entity
+    run(lambda: scammer_refers(t, db, "schreib @crypto_boss"))
+    ref = db.referrals(source_chat_id=CHAT)[0]
+    assert ref["status"] == "skipped" and reason in ref["reason"]
+    assert not [c for c, _ in t.client.sent if c not in ("me", CHAT)]
+
+
+def test_referral_never_contacts_existing_chat(ref_setup):
+    t, db = ref_setup
+    db.upsert_chat(BOSS, "Mama", None)
+    db.add_message(BOSS, "them", "Kommst du Sonntag zum Essen?")
+    run(lambda: scammer_refers(t, db, "schreib @crypto_boss"))
+    assert db.referrals(source_chat_id=CHAT)[0]["status"] == "skipped"
+    assert db.chat(BOSS)["enabled"] == 0
+
+
+def test_referral_unknown_user_and_daily_limit(ref_setup):
+    t, db = ref_setup
+    run(lambda: scammer_refers(t, db, "schreib @gibtsnicht_123"))
+    assert db.referrals(source_chat_id=CHAT)[0]["status"] == "failed"
+    db.set_setting("referral_daily_limit", 0)
+    run(lambda: scammer_refers(t, db, "dann eben @crypto_boss"))
+    ref = [r for r in db.referrals(source_chat_id=CHAT) if r["target"] == "crypto_boss"][0]
+    assert ref["status"] == "skipped" and "Tageslimit" in ref["reason"]
+
+
+def test_referral_by_phone_imports_contact(ref_setup):
+    t, db = ref_setup
+    t.client.phone_users["+447911123456"] = tg_user(777, "Phone Guy")
+    run(lambda: scammer_refers(t, db, "Kontaktiere +44 7911 123456 auf Telegram"))
+    assert t.client.imported == ["+447911123456"]
+    assert db.chat(777)["referred_from"] == CHAT
+
+
+def test_referral_suggest_mode_and_accept(ref_setup):
+    t, db = ref_setup
+    db.set_setting("referral_mode", "suggest")
+    run(lambda: scammer_refers(t, db, "schreib @crypto_boss"))
+    ref = db.referrals(source_chat_id=CHAT)[0]
+    assert ref["status"] == "proposed" and db.chat(BOSS) is None
+    assert "wartet auf deine Entscheidung" in [x for c, x in t.client.sent if c == "me"][0]
+    run(lambda: t.accept_referral(ref["id"]))
+    assert (BOSS, "ach herrje, wie geht das denn?") in t.client.sent
+
+
+def test_referral_off(ref_setup):
+    t, db = ref_setup
+    db.set_setting("referral_mode", "off")
+    run(lambda: scammer_refers(t, db, "schreib @crypto_boss"))
+    assert db.referrals() == [] and db.chat(CHAT)["mode"] == "auto"
+
+
+def test_analysis_history_is_kept(setup):
+    t, db = setup
+    t.set_mode(CHAT, "manual")
+    db.add_message(CHAT, "them", "hallo")
+    run(lambda: t.maybe_analyze(CHAT, force=True))
+    db.add_message(CHAT, "them", "und?")
+    run(lambda: t.maybe_analyze(CHAT, force=True))
+    history = db.analysis_history(CHAT)
+    assert len(history) == 2 and history[0]["messages"] == 2 and history[1]["messages"] == 1

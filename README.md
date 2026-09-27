@@ -83,6 +83,43 @@ KI verwirft ihre geplante Antwort.
 Beim Antworten sieht der Scammer „… schreibt“ mit realistischem Zögern (tippt, hört auf, tippt weiter,
 gelegentlich ein Fehlstart), dein Account erscheint dabei kurz „online“ und liest die Nachricht erst kurz vorher.
 
+### Verlauf & Auswertung (Unterseite pro Chat)
+
+Über **📜 Verlauf & Auswertung** im Chat öffnest du eine eigene Seite. Sie aktualisiert sich automatisch:
+
+- **Gesamter Verlauf** nach Tagen gegliedert, mit Suche, Best-of-Markierungen und optional internen Vermerken.
+- **☁️ Wortwolke:** die häufigsten Wörter. Größe = Häufigkeit, Farbe = wer sie vor allem benutzt (Scammer/KI).
+  Sie wird lokal berechnet und kostet keine Tokens.
+- **📝 Kurzzusammenfassung:** erstellt per Knopf den aktuellen Stand. Jede Zusammenfassung wird mit Zeitstempel
+  gespeichert, unter **🕰 Frühere Zusammenfassungen** siehst du, wie der Stand jeweils war.
+- Lage, Zahlen und Grafik wie auf der Chat-Seite.
+
+### Weiterleitungen („Adde sie“, „Schreib meinem Manager @…“)
+
+Scammer verweisen gern an „Kollegen“. Die App erkennt in Scammer-Nachrichten **@Benutzernamen, t.me-Links,
+Telefonnummern und geteilte Kontakte** und reagiert so:
+
+1. Der **alte Chat wird auf „KI schlägt vor“ gestellt**. Die KI antwortet dort nur noch mit deiner Freigabe.
+2. Die KI **legt den neuen Kontakt an** (Telefonnummern werden dafür als Kontakt „🕸 Tarpit“ importiert), übernimmt
+   Persona und **Hintergrund** aus dem alten Chat und schreibt nach 2–15 Minuten die **erste Nachricht**
+   („Anna hat gesagt, ich soll mich melden …“). Danach läuft der neue Chat wie jeder andere.
+3. Du bekommst eine **Benachrichtigung per Telegram** mit allem, was passiert ist.
+
+Schutzregeln: Personen aus deinen Kontakten und bestehende Chats werden nie angeschrieben, Bots, Kanäle und
+Gruppen auch nicht. Es gibt höchstens 3 neue Kontakte pro 24 h (einstellbar), weil Telegram Accounts bremst,
+die viele Fremde anschreiben. In den Einstellungen lässt sich das auf **„nur vorschlagen“** (du klickst
+„Anschreiben“ oder „Ignorieren“) oder **„ignorieren“** umstellen.
+
+### Benachrichtigungen
+
+Standardmäßig landen Benachrichtigungen in deinen **„Gespeicherten Nachrichten“**. Das ist zuverlässig, aber
+ohne Push, weil die Nachricht von dir selbst kommt. Für **Push-Benachrichtigungen**:
+
+1. In Telegram @BotFather öffnen, `/newbot`, Namen vergeben, Token kopieren.
+2. In der `.env`: `NOTIFY_BOT_TOKEN=…` (optional `PUBLIC_URL=http://…:8080` für Links zum Webinterface).
+3. Deinen neuen Bot in Telegram öffnen und einmal **Start** drücken.
+4. Unter *Log & Status* → **🔔 Test-Benachrichtigung senden** prüfen.
+
 ### Übersicht & Best-of
 
 Statusleiste (Telegram, KI-Modell, Probleme, Token/Kosten heute), Chatliste mit Live-Countdown und ⚡-Knopf,
@@ -105,6 +142,8 @@ nach Chat). **🩺 Modell testen** schickt eine winzige Test-Anfrage.
 | Tageslimit | 40 | max. automatische KI-Nachrichten pro Chat und Tag |
 | Kontext | 30 | so viele Nachrichten bekommt das Modell als Verlauf |
 | Analyse | alle 10 Nachrichten | automatische Lage-Analyse, optional mit eigenem (günstigem) Modell |
+| Weiterleitungen | automatisch, max. 3/24 h | neue Kontakte anschreiben / nur vorschlagen / ignorieren |
+| Benachrichtigungen | an | Telegram-Nachricht bei erkannten Weiterleitungen |
 
 ### Tokens sparen
 
@@ -154,5 +193,7 @@ Aufbau:
 | `tarpit/analysis.py` | KI-Analyse (Lage, Schlagworte, Best-of) und lokale Auswertungen |
 | `tarpit/charts.py` | Diagramme als SVG/HTML, ohne externe Bibliothek |
 | `tarpit/logs.py` | Log-Einträge für die Statusseite |
+| `tarpit/referrals.py` | Erkennung von Weiterleitungen (@Namen, t.me-Links, Telefonnummern) |
+| `tarpit/notify.py` | Benachrichtigungen per Telegram (Bot oder Gespeicherte Nachrichten) |
 | `tarpit/web.py` + `templates/` + `static/` | Webinterface (FastAPI, Jinja2, etwas JavaScript) |
 | `tarpit/db.py` | SQLite-Speicher |
