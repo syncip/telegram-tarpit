@@ -1,0 +1,13 @@
+{% for m in messages %}
+  <div class="msg {{ m.sender }}">
+    <div class="bubble">{{ m.text }}</div>
+    <div class="meta">
+      {{ {'them': 'Gegenüber', 'ai': '🤖 KI', 'me': 'Du', 'note': 'ℹ️ Vermerk'}[m.sender] }} · {{ m.ts | ts }}
+    </div>
+  </div>
+{% else %}
+  <p class="muted">Noch keine Nachrichten.</p>
+{% endfor %}
+{% if pending %}
+  <div class="msg note"><div class="bubble">⏳ Nächste KI-Antwort geplant für {{ pending.due | ts }}</div></div>
+{% endif %}

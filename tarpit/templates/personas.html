@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Personas – Telegram Tarpit{% endblock %}
+{% block content %}
+<h1>Personas</h1>
+<p class="muted">Die erste Persona ist der Standard für Chats ohne eigene Zuweisung. Die Regeln (nie Daten herausgeben, keine Links, nie als KI outen) gelten immer zusätzlich.</p>
+
+<div class="cards">
+{% for p in personas %}
+  <article class="card">
+    <header class="row between">
+      <strong>{{ p.name }}</strong>
+      <span class="row">
+        <a class="btn small" href="/personas?edit={{ p.id }}">Bearbeiten</a>
+        <form method="post" action="/personas/{{ p.id }}/delete" onsubmit="return confirm('Persona löschen?')">
+          <button class="btn small danger">Löschen</button>
+        </form>
+      </span>
+    </header>
+    <pre>{{ p.prompt }}</pre>
+  </article>
+{% endfor %}
+</div>
+
+<h2>{{ 'Persona bearbeiten' if editing else 'Neue Persona' }}</h2>
+<form method="post" action="/personas" class="stack">
+  {% if editing %}<input type="hidden" name="persona_id" value="{{ editing.id }}">{% endif %}
+  <label>Name <input type="text" name="name" required value="{{ editing.name if editing else '' }}"></label>
+  <label>Beschreibung (Wer bist du? Wie schreibst du? Was ist deine Masche zum Hinhalten?)
+    <textarea name="prompt" rows="10" required>{{ editing.prompt if editing else '' }}</textarea>
+  </label>
+  <div class="row">
+    <button class="btn primary">Speichern</button>
+    {% if editing %}<a class="btn" href="/personas">Abbrechen</a>{% endif %}
+  </div>
+</form>
+{% endblock %}

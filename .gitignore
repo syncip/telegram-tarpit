@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+data/*
+!data/.gitkeep
+*.session
+*.session-journal
+*.db
+.pytest_cache/

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Einstellungen – Telegram Tarpit{% endblock %}
+{% block content %}
+<h1>Einstellungen</h1>
+{% if saved %}<p class="banner ok">Gespeichert.</p>{% endif %}
+<form method="post" action="/settings" class="stack narrow">
+  <fieldset>
+    <legend>Modell</legend>
+    <label>Modell-ID <input type="text" name="model" value="{{ settings.model }}"></label>
+    <p class="muted small">API: {{ llm_base_url }}. Bei OpenRouter z. B. <code>openai/gpt-4o-mini</code>, <code>meta-llama/llama-3.3-70b-instruct</code>; siehe openrouter.ai/models.</p>
+    <label>Temperatur (0–2) <input type="text" name="temperature" value="{{ settings.temperature }}"></label>
+  </fieldset>
+  <fieldset>
+    <legend>Tarpit-Timing</legend>
+    <label>Minimale Antwortverzögerung (Sekunden) <input type="number" name="min_delay" value="{{ settings.min_delay }}"></label>
+    <label>Maximale Antwortverzögerung (Sekunden) <input type="number" name="max_delay" value="{{ settings.max_delay }}"></label>
+    <p class="muted small">Die Verzögerung ist log-uniform verteilt: meistens ein paar Minuten, manchmal Stunden.</p>
+    <label>Nachtruhe ab (Stunde) <input type="number" name="quiet_start" min="0" max="23" value="{{ settings.quiet_start }}"></label>
+    <label>Nachtruhe bis (Stunde) <input type="number" name="quiet_end" min="0" max="23" value="{{ settings.quiet_end }}"></label>
+  </fieldset>
+  <fieldset>
+    <legend>Limits</legend>
+    <label>Max. KI-Nachrichten pro Chat und Tag <input type="number" name="daily_limit" value="{{ settings.daily_limit }}"></label>
+    <label>Nachrichten Kontext für die KI <input type="number" name="history_limit" value="{{ settings.history_limit }}"></label>
+  </fieldset>
+  <button class="btn primary">Speichern</button>
+</form>
+{% endblock %}

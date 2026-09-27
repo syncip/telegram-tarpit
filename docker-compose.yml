@@ -1,0 +1,12 @@
+services:
+  tarpit:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: Europe/Berlin
+    volumes:
+      - ./data:/data
+    ports:
+      # nur lokal erreichbar; für Zugriff von außen einen Reverse-Proxy mit HTTPS davorsetzen
+      - "127.0.0.1:8080:8080"

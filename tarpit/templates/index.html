@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="row between">
+  <div class="stats">
+    <div class="stat"><span>{{ totals.active }}</span>Chats unter KI-Kontrolle</div>
+    <div class="stat"><span>{{ totals.ai_msgs }}</span>KI-Nachrichten gesendet</div>
+    <div class="stat"><span>{{ totals.baited }}</span>Nachrichten von Scammern seitdem</div>
+    <div class="stat"><span>{{ totals.wasted | duration }}</span>Scammer-Zeit gebunden</div>
+  </div>
+  <div class="actions">
+    <form method="post" action="/global">
+      {% if settings.global_enabled %}
+        <input type="hidden" name="enabled" value="0">
+        <button class="btn danger" title="Alle KI-Antworten sofort stoppen">⏸ Alles stoppen</button>
+      {% else %}
+        <input type="hidden" name="enabled" value="1">
+        <button class="btn primary">▶ KI global aktivieren</button>
+      {% endif %}
+    </form>
+    <form method="post" action="/sync">
+      <button class="btn">⟳ Chats aktualisieren</button>
+    </form>
+  </div>
+</section>
+
+{% if not settings.global_enabled %}
+<p class="banner">Die KI ist global deaktiviert. Es werden keine Antworten gesendet.</p>
+{% endif %}
+
+<table class="chats">
+  <thead>
+    <tr>
+      <th>Chat</th><th>KI</th><th>Persona</th><th>Letzte Nachricht</th>
+      <th>KI-Msgs</th><th>Gebunden</th><th>Nächste Antwort</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for c in chats %}
+    <tr class="{{ 'active' if c.enabled else '' }}">
+      <td>
+        <a href="/chats/{{ c.chat_id }}"><strong>{{ c.title }}</strong></a>
+        {% if c.username %}<div class="muted">@{{ c.username }}</div>{% endif %}
+      </td>
+      <td>
+        <form method="post" action="/chats/{{ c.chat_id }}/toggle">
+          <input type="hidden" name="field" value="enabled">
+          <input type="hidden" name="value" value="{{ '0' if c.enabled else '1' }}">
+          <input type="hidden" name="next" value="/">
+          <button class="switch {{ 'on' if c.enabled else '' }}" title="KI übernimmt diesen Chat">
+            {{ 'AN' if c.enabled else 'aus' }}
+          </button>
+        </form>
+        {% if c.paused %}<div class="muted">pausiert</div>{% endif %}
+      </td>
+      <td>
+        <form method="post" action="/chats/{{ c.chat_id }}/persona">
+          <input type="hidden" name="next" value="/">
+          <select name="persona_id" onchange="this.form.submit()">
+            <option value="">Standard</option>
+            {% for p in personas %}
+              <option value="{{ p.id }}" {{ 'selected' if p.id == c.persona_id else '' }}>{{ p.name }}</option>
+            {% endfor %}
+          </select>
+        </form>
+      </td>
+      <td>{{ c.last_message_at | ts }}</td>
+      <td>{{ c.n_ai }}</td>
+      <td>{{ ((c.last_them - c.first_ai) if c.first_ai and c.last_them else 0) | duration }}</td>
+      <td>{% if c.chat_id in pending %}{{ pending[c.chat_id].due | ts }}{% else %}–{% endif %}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="7" class="muted">Noch keine Chats. Klick auf „Chats aktualisieren“.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if me %}<p class="muted small">Angemeldet als {{ me.first_name }}{% if me.username %} (@{{ me.username }}){% endif %}</p>{% endif %}
+{% endblock %}

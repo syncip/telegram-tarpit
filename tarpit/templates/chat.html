@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}{{ chat.title }} – Telegram Tarpit{% endblock %}
+{% block content %}
+<section class="row between">
+  <div>
+    <h1>{{ chat.title }}</h1>
+    <p class="muted">
+      {% if chat.username %}@{{ chat.username }} · {% endif %}ID {{ chat.chat_id }}
+      · KI heute: {{ ai_today }}/{{ settings.daily_limit }}
+    </p>
+  </div>
+  <div class="actions">
+    {% for field, label_on, label_off in [('enabled', 'KI übernimmt: AN', 'KI übernimmt: aus'), ('paused', 'Pausiert', 'Pausieren')] %}
+    <form method="post" action="/chats/{{ chat.chat_id }}/toggle">
+      <input type="hidden" name="field" value="{{ field }}">
+      <input type="hidden" name="value" value="{{ '0' if chat[field] else '1' }}">
+      <input type="hidden" name="next" value="/chats/{{ chat.chat_id }}">
+      <button class="switch {{ 'on' if chat[field] else '' }}">{{ label_on if chat[field] else label_off }}</button>
+    </form>
+    {% endfor %}
+    <form method="post" action="/chats/{{ chat.chat_id }}/persona">
+      <input type="hidden" name="next" value="/chats/{{ chat.chat_id }}">
+      <select name="persona_id" onchange="this.form.submit()">
+        <option value="">Standard ({{ persona.name if persona else '–' }})</option>
+        {% for p in personas %}
+          <option value="{{ p.id }}" {{ 'selected' if p.id == chat.persona_id else '' }}>{{ p.name }}</option>
+        {% endfor %}
+      </select>
+    </form>
+  </div>
+</section>
+
+<div id="messages" class="messages" data-src="/chats/{{ chat.chat_id }}/messages">
+  {% include "_messages.html" %}
+</div>
+
+<section class="row controls">
+  <form method="post" action="/chats/{{ chat.chat_id }}/send" class="grow row">
+    <input type="text" name="text" placeholder="Selbst eine Nachricht schicken…" class="grow" autocomplete="off">
+    <button class="btn">Senden</button>
+  </form>
+  <form method="post" action="/chats/{{ chat.chat_id }}/reply-now">
+    <button class="btn primary" title="KI antwortet sofort, ohne Verzögerung">🤖 Jetzt antworten</button>
+  </form>
+  {% if pending %}
+  <form method="post" action="/chats/{{ chat.chat_id }}/cancel">
+    <button class="btn">Geplante Antwort verwerfen</button>
+  </form>
+  {% endif %}
+  <form method="post" action="/chats/{{ chat.chat_id }}/import">
+    <button class="btn" title="Letzte 50 Nachrichten aus Telegram laden">Verlauf laden</button>
+  </form>
+</section>
+
+<script>
+  // Verlauf alle 5 Sekunden neu laden
+  (function () {
+    const box = document.getElementById("messages");
+    const atBottom = () => box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    box.scrollTop = box.scrollHeight;
+    setInterval(async () => {
+      try {
+        const stick = atBottom();
+        const res = await fetch(box.dataset.src, { credentials: "same-origin" });
+        if (!res.ok) return;
+        box.innerHTML = await res.text();
+        if (stick) box.scrollTop = box.scrollHeight;
+      } catch (e) { /* offline, nächster Versuch */ }
+    }, 5000);
+  })();
+</script>
+{% endblock %}
