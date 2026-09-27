@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Telegram-Login – Telegram Tarpit{% endblock %}
+{% block content %}
+<div class="narrow">
+  <h1>Bei Telegram anmelden</h1>
+  <p class="muted">Die App braucht einmalig Zugriff auf deinen Telegram-Account. Die Session wird danach in <code>data/</code> gespeichert.</p>
+  {% if error %}<p class="banner">{{ error }}</p>{% endif %}
+
+  {% if step == "phone" %}
+  <form method="post" action="/login/phone" class="stack">
+    <label>Telefonnummer (international, z. B. +4917612345678)
+      <input type="tel" name="phone" required autofocus autocomplete="tel" placeholder="+49…">
+    </label>
+    <button class="btn primary">Code anfordern</button>
+  </form>
+  {% elif step == "code" %}
+  <form method="post" action="/login/code" class="stack">
+    <label>Login-Code (kommt als Nachricht von „Telegram“ in deiner App)
+      <input type="text" name="code" required autofocus inputmode="numeric" autocomplete="one-time-code">
+    </label>
+    <button class="btn primary">Anmelden</button>
+  </form>
+  <p class="muted small">Wichtig: Den Code nirgendwo in einen Telegram-Chat kopieren, sonst macht Telegram ihn aus Sicherheitsgründen ungültig. <a href="/login">Neue Nummer eingeben</a></p>
+  {% elif step == "password" %}
+  <form method="post" action="/login/password" class="stack">
+    <label>Zwei-Schritt-Passwort (Cloud-Passwort)
+      <input type="password" name="password" required autofocus autocomplete="current-password">
+    </label>
+    <button class="btn primary">Anmelden</button>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

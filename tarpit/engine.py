@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from telethon import TelegramClient, events
+from telethon.errors import SessionPasswordNeededError
 from telethon.tl.custom import Message
 from telethon.tl.types import User
 
@@ -23,10 +24,6 @@ from .timing import postpone_quiet_hours, sample_delay, typing_duration
 log = logging.getLogger(__name__)
 
 HISTORY_IMPORT_LIMIT = 50
-
-
-class NotLoggedIn(RuntimeError):
-    pass
 
 
 @dataclass
@@ -66,26 +63,33 @@ class Tarpit:
         self.pending: dict[int, PendingReply] = {}
         self.me: User | None = None
         self.rng = random.Random()
+        self._login_phone = ""
+        self._login_hash = ""
 
     # --- Lebenszyklus ------------------------------------------------------
 
-    async def start(self) -> None:
-        await self.client.connect()
-        if not await self.client.is_user_authorized():
-            await self.client.disconnect()
-            raise NotLoggedIn(
-                "Telegram-Session ist nicht angemeldet. Bitte zuerst `python -m tarpit.login` ausführen."
-            )
-        self.me = await self.client.get_me()
-        log.info("Angemeldet als %s (id %s)", display_name(self.me), self.me.id)
+    @property
+    def authorized(self) -> bool:
+        return self.me is not None
 
+    async def start(self) -> None:
+        """Verbindet mit Telegram. Ohne gültige Session läuft die App trotzdem,
+        das Webinterface zeigt dann die Login-Seite."""
         self.client.add_event_handler(
             self._on_incoming, events.NewMessage(incoming=True, func=lambda e: e.is_private)
         )
         self.client.add_event_handler(
             self._on_outgoing, events.NewMessage(outgoing=True, func=lambda e: e.is_private)
         )
+        await self.client.connect()
+        if await self.client.is_user_authorized():
+            await self._after_login()
+        else:
+            log.warning("Telegram-Session ist nicht angemeldet. Login über das Webinterface.")
 
+    async def _after_login(self) -> None:
+        self.me = await self.client.get_me()
+        log.info("Angemeldet als %s (id %s)", display_name(self.me), self.me.id)
         await self.sync_dialogs()
         # Was während der Downtime passiert ist, nachholen und ggf. antworten
         for chat in self.db.enabled_chats():
@@ -94,6 +98,35 @@ class Tarpit:
             except Exception:
                 log.exception("Konnte Verlauf von %s nicht nachladen", chat["chat_id"])
             self.maybe_schedule(chat["chat_id"])
+
+    # --- Login über das Webinterface ---------------------------------------
+
+    async def request_login_code(self, phone: str) -> None:
+        sent = await self.client.send_code_request(phone)
+        self._login_phone = phone
+        self._login_hash = sent.phone_code_hash
+
+    async def submit_login_code(self, code: str) -> bool:
+        """Gibt False zurück, wenn zusätzlich das 2FA-Passwort nötig ist."""
+        try:
+            await self.client.sign_in(
+                self._login_phone, code.strip().replace(" ", ""), phone_code_hash=self._login_hash
+            )
+        except SessionPasswordNeededError:
+            return False
+        await self._after_login()
+        return True
+
+    async def submit_login_password(self, password: str) -> None:
+        await self.client.sign_in(password=password)
+        await self._after_login()
+
+    async def logout(self) -> None:
+        self.cancel_all()
+        await self.client.log_out()
+        self.me = None
+        # log_out() trennt die Verbindung; für einen neuen Login wieder verbinden
+        await self.client.connect()
 
     async def stop(self) -> None:
         for pending in list(self.pending.values()):

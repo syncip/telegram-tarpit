@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+from telethon.errors import PhoneCodeInvalidError, PhoneNumberInvalidError
+
 from tarpit import web
 from tarpit.config import Config
 from tarpit.engine import PendingReply
@@ -17,6 +19,7 @@ class FakeTarpit:
         self.pending = {}
         self.me = SimpleNamespace(first_name="Ich", username="ich")
         self.sent = []
+        self.authorized = True
 
     async def start(self):
         self.db.upsert_chat(1, "Herr Scam", "scam", time.time())
@@ -45,6 +48,21 @@ class FakeTarpit:
 
     def reschedule_all(self):
         pass
+
+    async def request_login_code(self, phone):
+        if phone != "+491234":
+            raise PhoneNumberInvalidError(request=None)
+
+    async def submit_login_code(self, code):
+        if code != "12345":
+            raise PhoneCodeInvalidError(request=None)
+        return False  # 2FA nötig
+
+    async def submit_login_password(self, password):
+        self.authorized = True
+
+    async def logout(self):
+        self.authorized = False
 
     async def send_manual(self, chat_id, text):
         self.sent.append((chat_id, text))
@@ -97,3 +115,22 @@ def test_personas_and_settings(client):
 def test_cross_origin_post_blocked(client):
     r = client.post("/global", data={"enabled": "0"}, headers={"origin": "https://evil.example"})
     assert r.status_code == 403
+
+
+def test_telegram_login_flow(client):
+    client.post("/logout")
+    r = client.get("/", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/login"
+    assert "Telefonnummer" in client.get("/login").text
+
+    r = client.post("/login/phone", data={"phone": "+49 999"})
+    assert r.status_code == 400 and "Ungültige Telefonnummer" in r.text
+    assert "Login-Code" in client.post("/login/phone", data={"phone": "+49 1234"}).text
+
+    r = client.post("/login/code", data={"code": "000"})
+    assert r.status_code == 400 and "falsch" in r.text
+    assert "Zwei-Schritt-Passwort" in client.post("/login/code", data={"code": "12345"}).text
+
+    r = client.post("/login/password", data={"password": "pw"}, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    assert client.get("/").status_code == 200

@@ -73,5 +73,10 @@
   {% endfor %}
   </tbody>
 </table>
-{% if me %}<p class="muted small">Angemeldet als {{ me.first_name }}{% if me.username %} (@{{ me.username }}){% endif %}</p>{% endif %}
+{% if me %}
+<form method="post" action="/logout" class="row small muted" onsubmit="return confirm('Telegram-Session wirklich abmelden?')">
+  Angemeldet als {{ me.first_name }}{% if me.username %} (@{{ me.username }}){% endif %}
+  <button class="btn small">Abmelden</button>
+</form>
+{% endif %}
 {% endblock %}

@@ -16,6 +16,15 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from telethon.errors import (
+    FloodWaitError,
+    PasswordHashInvalidError,
+    PhoneCodeExpiredError,
+    PhoneCodeInvalidError,
+    PhoneNumberInvalidError,
+    RPCError,
+)
+
 from .config import Config
 from .db import INT_SETTINGS, Database
 from .engine import Tarpit
@@ -46,6 +55,21 @@ def _fmt_duration(seconds: float | None) -> str:
         return f"{hours} h {minutes:02d} min"
     days, hours = divmod(hours, 24)
     return f"{days} d {hours} h"
+
+
+def _login_error(exc: Exception) -> str:
+    messages = {
+        PhoneNumberInvalidError: "Ungültige Telefonnummer. Bitte im Format +49… eingeben.",
+        PhoneCodeInvalidError: "Der Code ist falsch.",
+        PhoneCodeExpiredError: "Der Code ist abgelaufen. Bitte neu anfordern.",
+        PasswordHashInvalidError: "Das 2FA-Passwort ist falsch.",
+    }
+    for exc_type, message in messages.items():
+        if isinstance(exc, exc_type):
+            return message
+    if isinstance(exc, FloodWaitError):
+        return f"Zu viele Versuche. Telegram verlangt {exc.seconds} Sekunden Wartezeit."
+    return f"Telegram meldet: {exc}"
 
 
 templates.env.filters["ts"] = _fmt_ts
@@ -88,6 +112,18 @@ def create_app(config: Config) -> FastAPI:
                 return HTMLResponse("Cross-Origin-Request blockiert", status_code=403)
         return await call_next(request)
 
+    @app.middleware("http")
+    async def require_telegram_login(request: Request, call_next):
+        path = request.url.path
+        tarpit_ = getattr(request.app.state, "tarpit", None)
+        if (
+            tarpit_ is not None
+            and not tarpit_.authorized
+            and not path.startswith(("/login", "/static"))
+        ):
+            return RedirectResponse("/login", status_code=303)
+        return await call_next(request)
+
     def db(request: Request) -> Database:
         return request.app.state.db
 
@@ -99,6 +135,49 @@ def create_app(config: Config) -> FastAPI:
 
     def safe_next(next_url: str, default: str = "/") -> str:
         return next_url if next_url.startswith("/") and not next_url.startswith("//") else default
+
+    # --- Telegram-Login ----------------------------------------------------
+
+    def login_page(request: Request, step: str, error: str | None = None, status: int = 200):
+        return templates.TemplateResponse(
+            request, "login.html", {"step": step, "error": error}, status_code=status
+        )
+
+    @app.get("/login", response_class=HTMLResponse)
+    async def login_get(request: Request):
+        if tarpit(request).authorized:
+            return back("/")
+        return login_page(request, "phone")
+
+    @app.post("/login/phone")
+    async def login_phone(request: Request, phone: str = Form(...)):
+        phone = phone.strip().replace(" ", "")
+        try:
+            await tarpit(request).request_login_code(phone)
+        except (RPCError, ValueError) as exc:
+            return login_page(request, "phone", _login_error(exc), 400)
+        return login_page(request, "code")
+
+    @app.post("/login/code")
+    async def login_code(request: Request, code: str = Form(...)):
+        try:
+            done = await tarpit(request).submit_login_code(code)
+        except (RPCError, ValueError) as exc:
+            return login_page(request, "code", _login_error(exc), 400)
+        return back("/") if done else login_page(request, "password")
+
+    @app.post("/login/password")
+    async def login_password(request: Request, password: str = Form(...)):
+        try:
+            await tarpit(request).submit_login_password(password)
+        except (RPCError, ValueError) as exc:
+            return login_page(request, "password", _login_error(exc), 400)
+        return back("/")
+
+    @app.post("/logout")
+    async def logout(request: Request):
+        await tarpit(request).logout()
+        return back("/login")
 
     # --- Übersicht ---------------------------------------------------------
 

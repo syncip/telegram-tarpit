@@ -39,7 +39,7 @@ table.chats { width: 100%; border-collapse: collapse; background: var(--panel); 
 table.chats th, table.chats td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 table.chats th { font-size: .8rem; color: var(--muted); font-weight: 600; }
 table.chats tr.active { background: color-mix(in srgb, var(--ai) 45%, transparent); }
-select, input[type=text], input[type=number], textarea { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--text); }
+select, input[type=text], input[type=number], input[type=tel], input[type=password], textarea { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--text); }
 textarea { width: 100%; }
 .messages { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; height: 60vh; overflow-y: auto; margin: 12px 0; display: flex; flex-direction: column; gap: 8px; }
 .msg { max-width: 75%; }

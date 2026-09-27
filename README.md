@@ -27,23 +27,23 @@ Jede Minute, die ein Betrüger mit „Gerda, 78“ verbringt, fehlt ihm bei echt
 ### Mit Docker
 
 ```bash
-# einmalig bei Telegram anmelden (fragt Nummer, Login-Code und ggf. 2FA-Passwort ab)
-docker compose run --rm tarpit python -m tarpit.login
-
-# starten
 docker compose up -d --build
 ```
 
 Das Webinterface läuft dann auf <http://127.0.0.1:8080>, mit Benutzer und Passwort aus der `.env`.
+Beim ersten Aufruf erscheint die **Telegram-Anmeldung**: Telefonnummer eingeben, dann den Code aus der
+Telegram-App und ggf. dein Zwei-Schritt-Passwort. Die Session bleibt danach in `./data/` gespeichert.
 
 ### Ohne Docker
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-python -m tarpit.login   # einmalig
 python -m tarpit
 ```
+
+Alternativ zur Anmeldung im Browser geht es auch im Terminal: `python -m tarpit.login`
+(bzw. `docker compose run --rm tarpit python -m tarpit.login`).
 
 Die Session-Datei und die Datenbank liegen in `./data/`. **Die Session-Datei ist so viel wert wie dein
 Telegram-Login**, also nicht weitergeben und nicht committen (steht bereits in `.gitignore`).

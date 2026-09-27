@@ -6,7 +6,6 @@ import sys
 import uvicorn
 
 from .config import ConfigError, load_config
-from .engine import NotLoggedIn
 from .web import create_app
 
 
@@ -18,10 +17,9 @@ def main() -> None:
     except ConfigError as exc:
         sys.exit(f"Konfigurationsfehler: {exc}")
     app = create_app(config)
-    try:
-        uvicorn.run(app, host=config.host, port=config.port, log_level="warning")
-    except NotLoggedIn as exc:
-        sys.exit(str(exc))
+    log = logging.getLogger("tarpit")
+    log.info("Webinterface: http://%s:%s", config.host, config.port)
+    uvicorn.run(app, host=config.host, port=config.port, log_level="warning")
 
 
 if __name__ == "__main__":
