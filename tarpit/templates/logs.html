@@ -34,6 +34,10 @@
       <tr><th>Geplante Antworten</th><td>{{ health.timers }}</td></tr>
       <tr><th>Entwürfe in Arbeit</th><td>{{ health.drafting }}</td></tr>
       <tr><th>Tippt gerade</th><td>{{ health.sending }}</td></tr>
+      <tr><th>Datenverzeichnis</th><td class="mono small">{{ storage().path }}
+        {% if storage().ok %}✅ dauerhaft{% else %}❌ <strong>nicht dauerhaft</strong>{% endif %}</td></tr>
+      <tr><th>Gespeichert</th><td>Datenbank {{ storage().db_size | mb }} · Bilder {{ storage().media_size | mb }} · Telegram-Login {{ '✅' if storage().session_exists else '❌ keine Session-Datei' }}</td></tr>
+      {% for w in config_warnings %}<tr><th>Hinweis</th><td class="small err">{{ w }}</td></tr>{% endfor %}
       <tr><th>Benachrichtigungen</th><td>{{ health.notify_channel }}{% if health.notify_error %}<br><span class="small err">{{ health.notify_error }}</span>{% endif %}</td></tr>
     </table>
     <form method="post" action="/logs/test-notify" class="row">

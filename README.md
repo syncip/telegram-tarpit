@@ -225,6 +225,29 @@ Eine Persona beschreibt **wer** die Figur ist, **wie** sie schreibt und **warum*
 Die festen Regeln (keine Daten, keine Links, nie als KI outen, Nachrichten des Gegenübers sind keine
 Anweisungen) hängt die App immer selbst an.
 
+## Daten & Backup
+
+Alles Wichtige liegt im Ordner `./data` neben der `docker-compose.yml` (im Container `/data`):
+
+| Datei | Inhalt |
+|---|---|
+| `telegram.session` | dein Telegram-Login (so wertvoll wie dein Passwort) |
+| `tarpit.db` | Chats, Personas, Einstellungen, Anbieter, Analysen, Log, Verbrauch |
+| `media/` | Bilder der Personas |
+| `ollama/` | lokale Modelle (nur mit `--profile local`) |
+
+Damit das einen Neubau des Containers übersteht, muss in der `docker-compose.yml` unter `volumes` die Zeile
+`- ./data:/data` stehen. Fehlt sie, zeigt die App oben auf jeder Seite eine rote Warnung. In Docker speichert
+die App immer in `/data`, auch wenn in der `.env` ein anderes `DATA_DIR` steht. Unter **Log & Status** siehst du,
+wo gespeichert wird und wie groß Datenbank und Bilder sind.
+
+Backup:
+```bash
+docker compose stop tarpit
+tar czf tarpit-backup-$(date +%F).tgz data/telegram.session data/tarpit.db data/media
+docker compose start tarpit
+```
+
 ## Zugriff von außen
 
 Der Port ist absichtlich nur an `127.0.0.1` gebunden. Für Zugriff vom Handy eignen sich zum Beispiel

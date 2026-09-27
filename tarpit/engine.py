@@ -147,7 +147,7 @@ class Tarpit:
     def __init__(self, config: Config, db: Database):
         self.config = config
         self.db = db
-        self.client = TelegramClient(str(config.session_path), config.api_id, config.api_hash)
+        self.client = self._new_client()
         self.llm = LLMClient(config.llm_base_url, config.llm_api_key)  # Standard aus der .env
         self._clients: dict[int, tuple[tuple, LLMClient]] = {}         # Anbieter-ID -> (Konfiguration, Client)
         self.notifier = Notifier(config.notify_bot_token, config.notify_chat_id, config.public_url)
@@ -181,12 +181,6 @@ class Tarpit:
     async def start(self) -> None:
         """Verbindet mit Telegram. Ohne gültige Session läuft die App trotzdem,
         das Webinterface zeigt dann die Login-Seite."""
-        self.client.add_event_handler(
-            self._on_incoming, events.NewMessage(incoming=True, func=lambda e: e.is_private)
-        )
-        self.client.add_event_handler(
-            self._on_outgoing, events.NewMessage(outgoing=True, func=lambda e: e.is_private)
-        )
         _log(logging.INFO, "telegram", "Verbinde mit Telegram …")
         await self.client.connect()
         self._watchdog = asyncio.create_task(self._watch_connection())
@@ -201,6 +195,9 @@ class Tarpit:
             raise RuntimeError("Telegram meldet die Session als nicht angemeldet")
         self.me = me
         _log(logging.INFO, "telegram", "Angemeldet als %s (id %s)", display_name(me), me.id)
+        session = getattr(self.client, "session", None)
+        if session is not None and hasattr(session, "save"):
+            session.save()  # Login sofort auf die Platte schreiben
         try:
             await self.sync_dialogs()
         except Exception:
@@ -352,10 +349,24 @@ class Tarpit:
             await self.client._on_login(me)
             await self._after_login(me)
 
+    def _new_client(self) -> TelegramClient:
+        """Telegram-Client mit Session-Datei im Datenverzeichnis und unseren Event-Handlern."""
+        client = TelegramClient(str(self.config.session_path), self.config.api_id, self.config.api_hash)
+        client.add_event_handler(
+            self._on_incoming, events.NewMessage(incoming=True, func=lambda e: e.is_private)
+        )
+        client.add_event_handler(
+            self._on_outgoing, events.NewMessage(outgoing=True, func=lambda e: e.is_private)
+        )
+        return client
+
     async def logout(self) -> None:
         self.stop_all()
         await self.client.log_out()
         self.me = None
+        # log_out() löscht die Session-Datei und macht den Client unbrauchbar:
+        # für einen neuen Login einen frischen Client anlegen
+        self.client = self._new_client()
         _log(logging.WARNING, "telegram", "Telegram-Session abgemeldet")
         # log_out() trennt die Verbindung; für einen neuen Login wieder verbinden
         await self.client.connect()

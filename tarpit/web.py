@@ -27,7 +27,7 @@ from telethon.errors import (
     RPCError,
 )
 
-from .config import Config
+from .config import Config, storage_status
 from .analysis import STAGES, STAGES_SHORT, keyword_cloud, lexicon_counts, response_times, word_counts
 from .charts import daily_series, grouped_bars, hbars, hourly_series, tag_cloud, word_cloud
 from .prompts import WEEKDAYS
@@ -102,6 +102,7 @@ templates.env.filters["tsfull"] = _fmt_ts_full
 templates.env.filters["ago"] = _fmt_ago
 templates.env.filters["usd"] = lambda v: f"${v:.2f}" if v >= 1 else f"${v:.4f}" if v >= 0.01 else f"${v:.5f}"
 templates.env.globals["server_now"] = time.time
+templates.env.filters["mb"] = lambda b: f"{(b or 0) / 1_000_000:.1f} MB"
 templates.env.filters["num"] = lambda v: f"{int(v or 0):,}".replace(",", ".")
 templates.env.filters["duration"] = _fmt_duration
 
@@ -128,7 +129,17 @@ def create_app(config: Config) -> FastAPI:
         app.state.tarpit = tarpit
         app.state.model_test = None
         app.state.provider_tests = {}  # Anbieter-ID (0 = .env) -> letztes Testergebnis inkl. Modellliste
-        log.info("Telegram Tarpit startet", extra={"source": "system"})
+        log.info("Telegram Tarpit startet, Daten in %s", config.data_dir, extra={"source": "system"})
+        for warning in config.warnings:
+            log.warning(warning, extra={"source": "system"})
+        storage = storage_status(config)
+        if not storage["persistent"]:
+            log.error("%s ist kein eingebundenes Volume: Login, Personas und Bilder gehen beim nächsten "
+                      "Neubau des Containers verloren. In docker-compose.yml muss unter volumes "
+                      "stehen: ./data:/data", config.data_dir, extra={"source": "system"})
+        elif not storage["writable"]:
+            log.error("In %s kann nicht geschrieben werden (Rechte prüfen)", config.data_dir,
+                      extra={"source": "system"})
         try:
             await tarpit.start()
         except Exception:
@@ -141,6 +152,9 @@ def create_app(config: Config) -> FastAPI:
             db.close()
 
     app = FastAPI(lifespan=lifespan, dependencies=[Depends(require_auth)], docs_url=None, redoc_url=None)
+    # Warnbanner auf jeder Seite, falls nicht dauerhaft gespeichert wird
+    templates.env.globals["storage"] = lambda: storage_status(config)
+    templates.env.globals["config_warnings"] = config.warnings
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
     @app.middleware("http")

@@ -18,6 +18,14 @@
       <a href="/settings">Einstellungen</a>
     </nav>
   </header>
+  {% set st = storage() %}
+  {% if not st.ok %}
+  <div class="storage-warning">
+    ⚠️ <strong>Achtung: Daten werden nicht dauerhaft gespeichert.</strong>
+    {% if not st.persistent %}Das Datenverzeichnis <code>{{ st.path }}</code> ist nicht als Volume eingebunden. Login, Personas und Bilder sind nach dem nächsten Neubau weg. In <code>docker-compose.yml</code> muss unter <code>volumes</code> die Zeile <code>- ./data:/data</code> stehen.{% else %}In <code>{{ st.path }}</code> kann nicht geschrieben werden (Dateirechte prüfen).{% endif %}
+    <a href="/logs">Details</a>
+  </div>
+  {% endif %}
   <main class="{% block main_class %}{% endblock %}">
     {% block content %}{% endblock %}
   </main>

@@ -243,3 +243,7 @@ table.kv td { overflow-wrap: anywhere; }
 code { overflow-wrap: anywhere; }
 input[type=url] { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--text); }
 table.roles td:first-child { white-space: nowrap; }
+
+.storage-warning { background: var(--status-critical); color: #fff; padding: 10px 16px; }
+.storage-warning a, .storage-warning code { color: #fff; }
+.storage-warning code { background: rgba(0,0,0,.2); }
