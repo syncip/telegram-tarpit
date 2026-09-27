@@ -16,6 +16,14 @@ class FakeClient:
     def __init__(self):
         self.sent = []
         self.read = []
+        self.logged_in_user = None
+        self.on_login_calls = 0
+
+    async def get_me(self):
+        return self.logged_in_user
+
+    async def _on_login(self, user):
+        self.on_login_calls += 1
 
     async def send_read_acknowledge(self, chat_id):
         self.read.append(chat_id)
@@ -122,73 +130,85 @@ from telethon.tl.types.auth import LoginTokenSuccess  # noqa: E402
 
 
 class FakeQR:
-    def __init__(self, outcomes):
+    def __init__(self, outcomes, accept_on_recreate=False):
         self.outcomes = list(outcomes)
         self.recreated = 0
         self.url = "tg://login?token=x"
-        self.accept_on_recreate = False
+        self.accept_on_recreate = accept_on_recreate
         self._resp = None
 
     async def wait(self, timeout=None):
         outcome = self.outcomes.pop(0)
-        if outcome is not None:
+        if isinstance(outcome, BaseException):
             raise outcome
+        return outcome
 
     async def recreate(self):
         self.recreated += 1
         if self.accept_on_recreate:
-            self._resp = LoginTokenSuccess(authorization=None)
+            self._resp = LoginTokenSuccess(authorization=SimpleNamespace(user=ME))
 
 
-def test_qr_loop_renews_token_and_logs_in(setup, monkeypatch):
-    t, _ = setup
-    logged_in = []
+ME = SimpleNamespace(id=1, first_name="Ich", last_name=None, username="ich")
 
-    async def fake_after_login():
-        logged_in.append(True)
+
+@pytest.fixture
+def qr_setup(setup, monkeypatch):
+    t, db = setup
+    logins = []
+
+    async def fake_after_login(user=None):
+        logins.append(user)
+        t.me = user
 
     monkeypatch.setattr(t, "_after_login", fake_after_login)
-    t._qr = FakeQR([asyncio.TimeoutError(), asyncio.TimeoutError(), None])
+    return t, logins
+
+
+def test_qr_loop_renews_token_and_logs_in(qr_setup):
+    t, logins = qr_setup
+    t._qr = FakeQR([asyncio.TimeoutError(), asyncio.TimeoutError(), ME])
     asyncio.run(t._qr_loop())
-    assert t._qr.recreated == 2 and t.qr_state == "done" and logged_in
+    assert t._qr.recreated == 2 and t.qr_state == "done" and logins == [ME]
 
 
-def test_qr_loop_needs_password(setup):
+def test_qr_scanned_while_token_renewed(qr_setup):
+    """Regression: Scan während der Erneuerung -> recreate() liefert LoginTokenSuccess."""
+    t, logins = qr_setup
+    t._qr = FakeQR([asyncio.TimeoutError()], accept_on_recreate=True)
+    asyncio.run(t._qr_loop())
+    assert t.qr_state == "done" and logins == [ME]
+    assert t.client.on_login_calls == 1  # Update-Zustand wurde initialisiert
+
+
+def test_qr_loop_needs_password(qr_setup):
     from telethon.errors import SessionPasswordNeededError
 
-    t, _ = setup
+    t, logins = qr_setup
     t._qr = FakeQR([SessionPasswordNeededError(request=None)])
     asyncio.run(t._qr_loop())
-    assert t.qr_state == "password"
+    assert t.qr_state == "password" and logins == []
 
 
-def test_qr_scanned_while_token_renewed(setup, monkeypatch):
-    """Regression: Scan während der Erneuerung -> recreate() liefert LoginTokenSuccess."""
-    t, _ = setup
-    logged_in = []
-
-    async def fake_after_login():
-        logged_in.append(True)
-
-    monkeypatch.setattr(t, "_after_login", fake_after_login)
-    t._qr = FakeQR([asyncio.TimeoutError()])
-    t._qr.accept_on_recreate = True
-    asyncio.run(t._qr_loop())
-    assert t.qr_state == "done" and logged_in
-
-
-def test_qr_error_but_session_authorized(setup, monkeypatch):
-    t, _ = setup
-    logged_in = []
-
-    async def fake_after_login():
-        logged_in.append(True)
-
-    async def authorized():
-        return True
-
-    monkeypatch.setattr(t, "_after_login", fake_after_login)
-    monkeypatch.setattr(t, "_session_authorized", authorized)
+def test_qr_error_but_session_authorized(qr_setup):
+    t, logins = qr_setup
+    t.client.logged_in_user = ME
     t._qr = FakeQR([AttributeError("kaputt")])
     asyncio.run(t._qr_loop())
-    assert t.qr_state == "done" and logged_in
+    assert t.qr_state == "done" and logins == [ME]
+
+
+def test_qr_error_not_authorized(qr_setup):
+    t, logins = qr_setup
+    t._qr = FakeQR([AttributeError("kaputt")])
+    asyncio.run(t._qr_loop())
+    assert t.qr_state == "error" and "kaputt" in t.qr_error and logins == []
+
+
+def test_refresh_login_picks_up_existing_session(qr_setup):
+    t, logins = qr_setup
+    asyncio.run(t.refresh_login())
+    assert logins == []
+    t.client.logged_in_user = ME
+    asyncio.run(t.refresh_login())
+    assert logins == [ME] and t.authorized

@@ -124,10 +124,16 @@ class Tarpit:
         else:
             log.warning("Telegram-Session ist nicht angemeldet. Login über das Webinterface.")
 
-    async def _after_login(self) -> None:
-        self.me = await self.client.get_me()
-        log.info("Angemeldet als %s (id %s)", display_name(self.me), self.me.id)
-        await self.sync_dialogs()
+    async def _after_login(self, user: User | None = None) -> None:
+        me = user or await self.client.get_me()
+        if me is None:
+            raise RuntimeError("Telegram meldet die Session als nicht angemeldet")
+        self.me = me
+        log.info("Angemeldet als %s (id %s)", display_name(me), me.id)
+        try:
+            await self.sync_dialogs()
+        except Exception:
+            log.exception("Chatliste konnte nicht geladen werden")
         # Was während der Downtime passiert ist, nachholen und ggf. antworten
         for chat in self.db.enabled_chats():
             try:
@@ -191,30 +197,41 @@ class Tarpit:
             return None
 
     async def _qr_loop(self) -> None:
+        user = None
         try:
             while True:
                 try:
                     # Eigenes, festes Timeout statt Telethons Berechnung aus der
                     # Ablaufzeit: die geht schief, wenn die Uhr des Hosts abweicht.
-                    await self._qr.wait(QR_WAIT_SECONDS)
+                    user = await self._qr.wait(QR_WAIT_SECONDS)
                     break
                 except asyncio.TimeoutError:
                     await self._qr.recreate()
-                    if await self._qr_token_accepted():
+                    user = await self._qr_token_accepted()
+                    if user is not None:
                         break
         except SessionPasswordNeededError:
+            log.info("QR-Code bestätigt, Zwei-Schritt-Passwort nötig")
             self.qr_state = "password"
             return
         except Exception as exc:
-            if not await self._session_authorized():
+            user = await self._fetch_me()
+            if user is None:
                 log.exception("QR-Login fehlgeschlagen")
                 self.qr_state = "error"
                 self.qr_error = str(exc)
                 return
+            await self.client._on_login(user)
+        log.info("QR-Code bestätigt")
         self.qr_state = "done"
-        await self._after_login()
+        try:
+            await self._after_login(user)
+        except Exception as exc:
+            log.exception("Login konnte nicht abgeschlossen werden")
+            self.qr_state = "error"
+            self.qr_error = str(exc)
 
-    async def _qr_token_accepted(self) -> bool:
+    async def _qr_token_accepted(self) -> User | None:
         """Wurde der QR-Code gescannt, während wir ihn erneuert haben, liefert
         Telegram statt eines neuen Tokens direkt das Login-Ergebnis zurück."""
         resp = getattr(self._qr, "_resp", None)
@@ -222,19 +239,34 @@ class Tarpit:
             # Account liegt in einem anderen Rechenzentrum
             await self.client._switch_dc(resp.dc_id)
             resp = await self.client(functions.auth.ImportLoginTokenRequest(resp.token))
-        return isinstance(resp, types.auth.LoginTokenSuccess)
+        if not isinstance(resp, types.auth.LoginTokenSuccess):
+            return None
+        user = resp.authorization.user
+        # Das macht Telethon sonst selbst in QRLogin.wait(): Login-Status und
+        # Update-Zustand setzen, damit neue Nachrichten ankommen.
+        await self.client._on_login(user)
+        return user
 
-    async def _session_authorized(self) -> bool:
+    async def _fetch_me(self) -> User | None:
+        """Fragt Telegram direkt, ob die Session angemeldet ist.
+
+        Nicht is_user_authorized() verwenden: Telethon merkt sich dort das
+        Ergebnis vom Start ("nein") und fragt danach nie wieder nach.
+        """
         try:
-            return await self.client.is_user_authorized()
+            return await self.client.get_me()
         except Exception:
-            return False
+            return None
 
     async def refresh_login(self) -> None:
         """Übernimmt einen Login, der auf Telegram-Seite schon erfolgt ist,
         den die App aber (noch) nicht mitbekommen hat."""
-        if not self.authorized and await self._session_authorized():
-            await self._after_login()
+        if self.authorized or (self._qr_task is not None and not self._qr_task.done()):
+            return
+        me = await self._fetch_me()
+        if me is not None:
+            await self.client._on_login(me)
+            await self._after_login(me)
 
     async def logout(self) -> None:
         self.cancel_all()

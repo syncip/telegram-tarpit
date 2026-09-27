@@ -166,3 +166,15 @@ def test_qr_login_flow(client):
     assert "Zwei-Schritt-Passwort" in client.get("/login/qr").text
     client.post("/login/password", data={"password": "pw"})
     assert client.get("/login/qr", follow_redirects=False).headers["location"] == "/"
+
+
+def test_qr_page_while_login_completes(client):
+    """Regression: Neuladen während des Login-Abschlusses darf nicht abbrechen."""
+    client.post("/logout")
+    client.post("/login/qr")
+    t = client.app.state.tarpit
+    t.qr_state, t.qr_url = "done", None
+    r = client.get("/login/qr", follow_redirects=False)
+    assert r.status_code == 200 and "Anmeldung wird abgeschlossen" in r.text
+    client.get("/login")  # darf den laufenden Login nicht abbrechen
+    assert t.qr_state == "done"

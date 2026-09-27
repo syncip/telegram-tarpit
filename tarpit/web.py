@@ -155,7 +155,6 @@ def create_app(config: Config) -> FastAPI:
         await tarpit(request).refresh_login()
         if tarpit(request).authorized:
             return back("/")
-        tarpit(request).cancel_qr_login()
         return login_page(request, "phone")
 
     @app.post("/login/phone")
@@ -189,17 +188,18 @@ def create_app(config: Config) -> FastAPI:
     @app.get("/login/qr", response_class=HTMLResponse)
     async def login_qr(request: Request):
         t = tarpit(request)
-        if t.qr_state == "done" or t.qr_url is None:
-            await t.refresh_login()
+        await t.refresh_login()
         if t.authorized:
             return back("/")
+        if t.qr_state is None:
+            return back("/login")
         if t.qr_state == "password":
             return login_page(request, "password")
         if t.qr_state == "error":
             return login_page(request, "phone", f"QR-Login fehlgeschlagen: {t.qr_error}", 400)
-        if t.qr_url is None:
-            return back("/login")
-        svg = segno.make(t.qr_url, error="l").svg_inline(scale=6, border=2, dark="#000", light="#fff")
+        svg = None
+        if t.qr_state == "waiting" and t.qr_url is not None:
+            svg = segno.make(t.qr_url, error="l").svg_inline(scale=6, border=2, dark="#000", light="#fff")
         return templates.TemplateResponse(request, "login_qr.html", {"qr_svg": svg})
 
     @app.post("/login/code")
