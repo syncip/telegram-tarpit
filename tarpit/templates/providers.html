@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Anbieter – Telegram Tarpit{% endblock %}
+{% block page %}providers{% endblock %}
+{% block content %}
+<h1>🔌 KI-Anbieter</h1>
+<p class="muted">Alle Anbieter mit OpenAI-kompatibler Schnittstelle: OpenRouter, OpenAI, Google Gemini, Groq sowie lokale Modelle über Ollama oder LM Studio. Welche Aufgabe welchen Anbieter nutzt, stellst du unter <a href="/settings">Einstellungen</a> ein.</p>
+{% if error %}<p class="banner">{{ error }}</p>{% endif %}
+
+<div class="cards">
+  <article class="card">
+    <header class="row between"><strong>Standard (.env)</strong><span class="chip">fest</span></header>
+    <table class="kv">
+      <tr><th>Adresse</th><td class="mono small">{{ env_base_url }}</td></tr>
+      <tr><th>Schlüssel</th><td class="mono small">{{ env_key }}</td></tr>
+      <tr><th>Genutzt für</th><td>{{ usage_by_provider.get('', []) | join(', ') or '–' }}</td></tr>
+    </table>
+    {% set test = tests.get(0) %}
+    {% include "_provider_test.html" %}
+    <form method="post" action="/anbieter/0/test"><button class="btn small">🩺 Testen &amp; Modelle laden</button></form>
+  </article>
+
+  {% for pr in providers %}
+  <article class="card" id="provider-{{ pr.id }}">
+    <header class="row between">
+      <strong>{{ pr.name }}</strong>
+      <span class="chip">{{ presets[pr.kind].name if pr.kind in presets else pr.kind }}</span>
+    </header>
+    <table class="kv">
+      <tr><th>Adresse</th><td class="mono small">{{ pr.base_url }}</td></tr>
+      <tr><th>Schlüssel</th><td class="mono small">{{ mask(pr.api_key) }}</td></tr>
+      <tr><th>Genutzt für</th><td>{{ usage_by_provider.get(pr.id | string, []) | join(', ') or '–' }}</td></tr>
+    </table>
+    {% set test = tests.get(pr.id) %}
+    {% include "_provider_test.html" %}
+    <div class="row">
+      <form method="post" action="/anbieter/{{ pr.id }}/test"><button class="btn small">🩺 Testen &amp; Modelle laden</button></form>
+      <a class="btn small" href="/anbieter?edit={{ pr.id }}#form">Bearbeiten</a>
+      <form method="post" action="/anbieter/{{ pr.id }}/delete" onsubmit="return confirm('Anbieter löschen? Aufgaben, die ihn nutzen, fallen auf den Standard zurück.')">
+        <button class="btn small danger">Löschen</button>
+      </form>
+    </div>
+  </article>
+  {% endfor %}
+</div>
+
+<h2 id="form">{{ 'Anbieter bearbeiten' if editing else 'Anbieter hinzufügen' }}</h2>
+<form method="post" action="/anbieter" class="stack narrow" id="provider-form">
+  {% if editing %}<input type="hidden" name="provider_id" value="{{ editing.id }}">{% endif %}
+  <label>Art
+    <select name="kind" id="provider-kind">
+      {% for kind, preset in presets.items() %}
+        <option value="{{ kind }}" data-url="{{ preset.base_url }}" data-name="{{ preset.name }}" data-hint="{{ preset.hint }}"
+                data-key="{{ '1' if preset.needs_key else '' }}" data-models="{{ preset.example_models | join(', ') }}"
+                {{ 'selected' if (editing and editing.kind == kind) or (not editing and kind == 'openrouter') }}>{{ preset.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <p class="muted small" id="provider-hint"></p>
+  <label>Name <input type="text" name="name" id="provider-name" required value="{{ editing.name if editing else '' }}"></label>
+  <label>Adresse (Base-URL) <input type="url" name="base_url" id="provider-url" required value="{{ editing.base_url if editing else '' }}" placeholder="https://…/v1"></label>
+  <label>API-Schlüssel <input type="password" name="api_key" autocomplete="off"
+         placeholder="{{ 'leer lassen = gespeicherten Schlüssel behalten' if editing else 'bei lokalen Modellen leer lassen' }}"></label>
+  <div class="row">
+    <button class="btn primary">Speichern</button>
+    {% if editing %}<a class="btn" href="/anbieter">Abbrechen</a>{% endif %}
+  </div>
+</form>
+
+<section class="card narrow" style="margin-top: 16px">
+  <h2 class="flush">💻 Lokale Modelle (z. B. Gemma, Llama, Qwen)</h2>
+  <ol class="small">
+    <li><a href="https://ollama.com" rel="noopener">Ollama</a> installieren (oder mit <code>docker compose --profile local up -d</code> gleich mitstarten, siehe README).</li>
+    <li>Ein kleines Modell laden, z. B. <code>ollama pull gemma3:4b</code>. Welche Modelle es gibt, zeigt ollama.com/library.</li>
+    <li>Hier den Anbieter „Ollama (lokal)“ hinzufügen und testen, dann unter Einstellungen das Modell auswählen.</li>
+  </ol>
+  <p class="muted small">Kleine Modelle (2–4 Mrd. Parameter) laufen auch ohne Grafikkarte, sind dann aber langsam (oft 10–60 s pro Antwort, beim Tarpit egal) und halten die Rolle weniger zuverlässig. Die Sicherheitsfilter gelten trotzdem. Bild- und Spracherkennung brauchen dafür geeignete Modelle.</p>
+</section>
+{% endblock %}

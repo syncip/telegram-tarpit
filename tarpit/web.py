@@ -36,6 +36,7 @@ from .db import BOOL_SETTINGS, FLOAT_SETTINGS, INT_SETTINGS, MODES, REFERRAL_MOD
 from .engine import Tarpit
 from .logs import SOURCES, DatabaseLogHandler
 from .media import MAX_UPLOAD_BYTES, prepare_upload
+from .providers import PRESETS, mask_key
 from .usage import usage_report
 
 log = logging.getLogger(__name__)
@@ -126,6 +127,7 @@ def create_app(config: Config) -> FastAPI:
         app.state.db = db
         app.state.tarpit = tarpit
         app.state.model_test = None
+        app.state.provider_tests = {}  # Anbieter-ID (0 = .env) -> letztes Testergebnis inkl. Modellliste
         log.info("Telegram Tarpit startet", extra={"source": "system"})
         try:
             await tarpit.start()
@@ -316,6 +318,7 @@ def create_app(config: Config) -> FastAPI:
                 "wordcloud": word_cloud(word_counts(active_messages), "Noch zu wenige Nachrichten in KI-Chats.",
                                         limit=70, min_count=3),
                 "referrals": d.referrals(limit=10),
+                "approvals": [c for c in chats if c["enabled"] and c["mode"] == "review" and c["draft_text"]],
                 "chat_titles": {c["chat_id"]: c["title"] for c in chats},
                 "candidate_label": lambda r: Candidate(r["kind"], r["target"]).label,
                 "now": time.time(),
@@ -569,16 +572,18 @@ def create_app(config: Config) -> FastAPI:
         return back(f"/chats/{chat_id}")
 
     @app.post("/chats/{chat_id}/draft/regenerate")
-    async def chat_draft_regenerate(request: Request, chat_id: int, instruction: str = Form("")):
+    async def chat_draft_regenerate(
+        request: Request, chat_id: int, instruction: str = Form(""), next: str = Form(""),
+    ):
         get_chat_or_404(request, chat_id)
         tarpit(request).regenerate_draft(chat_id, instruction)
-        return back(f"/chats/{chat_id}")
+        return back(safe_next(next, f"/chats/{chat_id}"))
 
     @app.post("/chats/{chat_id}/draft/discard")
-    async def chat_draft_discard(request: Request, chat_id: int):
+    async def chat_draft_discard(request: Request, chat_id: int, next: str = Form("")):
         get_chat_or_404(request, chat_id)
         tarpit(request).discard_draft(chat_id)
-        return back(f"/chats/{chat_id}")
+        return back(safe_next(next, f"/chats/{chat_id}"))
 
     @app.post("/chats/{chat_id}/import")
     async def chat_import(request: Request, chat_id: int):
@@ -642,6 +647,66 @@ def create_app(config: Config) -> FastAPI:
         await t.notifier.send(t.client, t.me.id if t.me else None,
                               "🔔 Test: So erreichen dich Benachrichtigungen." + t.notifier.link("/logs"))
         return back("/logs")
+
+    # --- Anbieter ------------------------------------------------------------
+
+    ROLE_NAMES = {"model_provider": "Antworten", "analysis_provider": "Analyse",
+                  "vision_provider": "Bilderkennung", "stt_provider": "Spracherkennung"}
+
+    @app.get("/anbieter", response_class=HTMLResponse)
+    async def providers_page(request: Request, edit: int | None = None, error: str = ""):
+        d = db(request)
+        settings = d.settings()
+        usage_by_provider: dict[str, list[str]] = {}
+        for key, name in ROLE_NAMES.items():
+            model_key = {"model_provider": "model", "analysis_provider": "analysis_model",
+                         "vision_provider": "vision_model", "stt_provider": "stt_model"}[key]
+            if key == "model_provider" or settings[model_key]:
+                usage_by_provider.setdefault(settings[key], []).append(name)
+        return templates.TemplateResponse(request, "providers.html", {
+            "providers": d.providers(),
+            "presets": PRESETS,
+            "editing": d.provider(edit) if edit else None,
+            "tests": request.app.state.provider_tests,
+            "env_base_url": config.llm_base_url,
+            "env_key": mask_key(config.llm_api_key),
+            "mask": mask_key,
+            "usage_by_provider": usage_by_provider,
+            "error": error,
+        })
+
+    @app.post("/anbieter")
+    async def provider_save(
+        request: Request, name: str = Form(...), kind: str = Form(...), base_url: str = Form(...),
+        api_key: str = Form(""), provider_id: str = Form(""),
+    ):
+        base_url = base_url.strip().rstrip("/")
+        if kind not in PRESETS:
+            raise HTTPException(400, "Unbekannte Art")
+        if not base_url.startswith(("http://", "https://")):
+            return back("/anbieter?error=" + quote("Die Adresse muss mit http:// oder https:// beginnen"))
+        pid = db(request).save_provider(
+            int(provider_id) if provider_id.isdigit() else None, name.strip() or PRESETS[kind].name,
+            kind, base_url, api_key.strip() or (None if provider_id else ""),
+        )
+        request.app.state.provider_tests.pop(pid, None)
+        log.info("Anbieter gespeichert: %s (%s)", name, base_url, extra={"source": "llm"})
+        return back(f"/anbieter#provider-{pid}")
+
+    @app.post("/anbieter/{provider_id}/delete")
+    async def provider_delete(request: Request, provider_id: int):
+        db(request).delete_provider(provider_id)
+        request.app.state.provider_tests.pop(provider_id, None)
+        return back("/anbieter")
+
+    @app.post("/anbieter/{provider_id}/test")
+    async def provider_test(request: Request, provider_id: int):
+        if provider_id and db(request).provider(provider_id) is None:
+            raise HTTPException(404, "Anbieter nicht gefunden")
+        ok, message, models = await tarpit(request).test_provider(provider_id)
+        request.app.state.provider_tests[provider_id] = {"ok": ok, "message": message, "models": models,
+                                                         "at": time.time()}
+        return back(f"/anbieter#provider-{provider_id}" if provider_id else "/anbieter")
 
     @app.get("/verbrauch", response_class=HTMLResponse)
     async def usage_page(request: Request):
@@ -736,7 +801,9 @@ def create_app(config: Config) -> FastAPI:
             request,
             "settings.html",
             {"settings": db(request).settings(), "saved": saved, "llm_base_url": config.llm_base_url,
-             "notify_channel": tarpit(request).notifier.channel},
+             "notify_channel": tarpit(request).notifier.channel, "providers": db(request).providers(),
+             "model_lists": {("env" if pid == 0 else str(pid)): t["models"]
+                             for pid, t in request.app.state.provider_tests.items() if t["models"]}},
         )
 
     @app.post("/settings")
@@ -749,6 +816,10 @@ def create_app(config: Config) -> FastAPI:
         for key in ("analysis_model", "vision_model", "stt_model"):
             if key in form:
                 d.set_setting(key, str(form.get(key, "")).strip())
+        provider_ids = {str(pr["id"]) for pr in d.providers()}
+        for key in ("model_provider", "analysis_provider", "vision_provider", "stt_provider"):
+            if key in form and (form.get(key) == "" or form.get(key) in provider_ids):
+                d.set_setting(key, form.get(key))
         if form.get("stt_backend") in STT_BACKENDS:
             d.set_setting("stt_backend", form.get("stt_backend"))
         current = d.settings()

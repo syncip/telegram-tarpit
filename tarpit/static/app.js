@@ -115,8 +115,8 @@
       return ["idle", "Keine Antwort nötig: du oder die KI habt zuletzt geschrieben"];
     }
 
-    function renderDraftImages(images) {
-      const box = document.getElementById("draft-images");
+    function renderDraftImages(images) { renderImages(document.getElementById("draft-images"), images); }
+    function renderImages(box, images) {
       if (!box) return;
       const key = JSON.stringify(images);
       if (box.dataset.key === key) return;
@@ -161,6 +161,17 @@
         const edited = document.getElementById("draft-edited");
         if (edited) edited.hidden = !s.draft_edited;
         renderDraftImages(s.draft_images || []);
+        // Freigabe-Karte
+        const approval = document.getElementById("approval");
+        if (approval) {
+          const waiting = s.enabled && s.mode === "review" && (s.draft_text || s.generating) && !s.sending;
+          approval.hidden = !waiting;
+          const at = document.getElementById("approval-text");
+          if (at && at.textContent !== (s.draft_text || "")) at.textContent = s.draft_text || "";
+          const ag = document.getElementById("approval-generating");
+          if (ag) ag.hidden = !s.generating;
+          renderImages(document.getElementById("approval-images"), s.draft_images || []);
+        }
         const gen = document.getElementById("draft-generating");
         if (gen) gen.hidden = !s.generating;
         // Entwurf nur aktualisieren, wenn du ihn gerade nicht bearbeitest
@@ -226,6 +237,35 @@
       } catch (e) { /* nächster Versuch */ }
     }, 4000);
   }
+
+  // --- Anbieter-Formular: Vorlage füllt Adresse und Namen ------------------------
+  const kindSelect = document.getElementById("provider-kind");
+  if (kindSelect) {
+    const url = document.getElementById("provider-url");
+    const name = document.getElementById("provider-name");
+    const hint = document.getElementById("provider-hint");
+    let lastAuto = { url: url.value, name: name.value };
+    function applyPreset(initial) {
+      const opt = kindSelect.selectedOptions[0];
+      hint.textContent = opt.dataset.hint + (opt.dataset.models ? " Beispiele: " + opt.dataset.models : "");
+      // nur überschreiben, was noch leer ist oder von der letzten Vorlage stammt
+      if (!initial || !url.value) {
+        if (!url.value || url.value === lastAuto.url) url.value = opt.dataset.url;
+        if (!name.value || name.value === lastAuto.name) name.value = opt.dataset.name;
+      }
+      lastAuto = { url: opt.dataset.url, name: opt.dataset.name };
+    }
+    kindSelect.addEventListener("change", () => applyPreset(false));
+    applyPreset(true);
+  }
+
+  // --- Einstellungen: Modellvorschläge passend zum gewählten Anbieter ----------------
+  document.querySelectorAll("select[data-model-input]").forEach((sel) => {
+    sel.addEventListener("change", () => {
+      const input = document.getElementById("input-" + sel.dataset.modelInput);
+      if (input) input.setAttribute("list", "models-" + (sel.value || "env"));
+    });
+  });
 
   // --- Log-Seite ---------------------------------------------------------------
   const logRows = document.getElementById("log-rows");

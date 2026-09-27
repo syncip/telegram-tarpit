@@ -40,6 +40,29 @@
   <div class="chat-main">
     {# --- Steuerpult ----------------------------------------------------- #}
     {% if chat.enabled %}
+    {# --- Freigabe: erscheint live, sobald ein Entwurf auf dich wartet ---------- #}
+    <section class="card approval" id="approval" {{ 'hidden' if not (chat.mode == 'review' and status.draft_text) }}>
+      <div class="row between">
+        <strong>👀 Diese Antwort wartet auf deine Freigabe</strong>
+        <span id="approval-generating" class="chip busy" {{ 'hidden' if not status.generating }}>✍️ wird neu erzeugt …</span>
+      </div>
+      <div id="approval-text" class="approval-text">{{ status.draft_text or '' }}</div>
+      <div id="approval-images" class="thumbs"></div>
+      <div class="row approval-actions">
+        <form method="post" action="/chats/{{ chat.chat_id }}/reply-now">
+          <button class="btn primary big-btn">✅ Freigeben &amp; senden</button>
+        </form>
+        <form method="post" action="/chats/{{ chat.chat_id }}/draft/discard">
+          <button class="btn danger big-btn" title="Entwurf verwerfen, diesmal nicht antworten">❌ Ablehnen</button>
+        </form>
+        <form method="post" action="/chats/{{ chat.chat_id }}/draft/regenerate" class="row grow">
+          <input type="text" name="instruction" class="grow" placeholder="Optional: was soll anders sein?" value="">
+          <button class="btn big-btn">🔄 Neu generieren</button>
+        </form>
+      </div>
+      <p class="muted small">Oder unten im Entwurf <a href="#draft-text">✏️ selbst bearbeiten</a>.</p>
+    </section>
+
     <section class="card control">
       <div class="segmented" role="group" aria-label="Wer antwortet?">
         {% for value, label, hint in [('auto', '🤖 KI automatisch', 'Die KI antwortet selbst, zum geplanten Zeitpunkt'),

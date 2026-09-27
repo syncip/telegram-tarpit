@@ -586,3 +586,39 @@ def test_vision_and_speech_recognition(setup):
 
 def run_value(coro):
     return asyncio.run(coro)
+
+
+
+# --- Anbieter ---------------------------------------------------------------------------
+
+def test_route_uses_provider_per_role(setup):
+    t, db = setup
+    local = db.save_provider(None, "Ollama", "ollama", "http://localhost:11434/v1", "")
+    google = db.save_provider(None, "Google", "google", "https://generativelanguage.googleapis.com/v1beta/openai", "g-key")
+    db.set_setting("model", "gemma3:4b")
+    db.set_setting("model_provider", str(local))
+    db.set_setting("vision_provider", str(google))
+    db.set_setting("vision_model", "gemini-2.5-flash")
+
+    client, model = t.route("reply")
+    assert model == "gemma3:4b" and client.base_url == "http://localhost:11434/v1"
+    assert client._http.timeout.read == 300  # lokale Modelle sind langsam
+    assert t.route("analysis") == (client, "gemma3:4b")  # ohne eigenes Analyse-Modell wie Antworten
+    vclient, vmodel = t.route("vision")
+    assert vmodel == "gemini-2.5-flash" and "googleapis" in vclient.base_url
+    assert t.route("stt")[0] is t.llm  # kein Anbieter gewählt: Standard aus der .env
+    assert t.route("reply")[0] is client  # Client wird wiederverwendet
+
+    db.save_provider(local, "Ollama", "ollama", "http://192.168.1.5:11434/v1", None)
+    assert t.route("reply")[0].base_url == "http://192.168.1.5:11434/v1"  # Änderung greift sofort
+
+    db.delete_provider(local)
+    assert db.settings()["model_provider"] == ""  # fällt auf Standard zurück
+    assert t.route("reply")[0] is t.llm
+
+
+def test_save_provider_keeps_key_when_empty(tmp_path):
+    db = Database(tmp_path / "t.db")
+    pid = db.save_provider(None, "OpenAI", "openai", "https://api.openai.com/v1", "sk-geheim")
+    db.save_provider(pid, "OpenAI neu", "openai", "https://api.openai.com/v1", None)
+    assert db.provider(pid)["api_key"] == "sk-geheim" and db.provider(pid)["name"] == "OpenAI neu"

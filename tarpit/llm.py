@@ -106,17 +106,17 @@ class ChatResult:
 
 
 class LLMClient:
-    def __init__(self, base_url: str, api_key: str):
-        headers = {
+    def __init__(self, base_url: str, api_key: str, timeout: float = 120):
+        self.base_url = base_url.rstrip("/")
+        self.is_openrouter = "openrouter.ai" in self.base_url
+        headers = {}
+        if self.is_openrouter:
             # von OpenRouter empfohlen, damit die App im Dashboard erkennbar ist
-            "HTTP-Referer": "https://github.com/syncip/telegram-tarpit",
-            "X-Title": "telegram-tarpit",
-        }
+            headers.update({"HTTP-Referer": "https://github.com/syncip/telegram-tarpit", "X-Title": "telegram-tarpit"})
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        self.base_url = base_url
         self.stats = LLMStats()
-        self._http = httpx.AsyncClient(base_url=base_url, headers=headers, timeout=120)
+        self._http = httpx.AsyncClient(base_url=self.base_url, headers=headers, timeout=timeout)
 
     async def chat(
         self, model: str, messages: list[dict[str, str]], temperature: float,
@@ -128,13 +128,10 @@ class LLMClient:
         self, model: str, messages: list[dict], temperature: float,
         max_tokens: int | None = None,
     ) -> ChatResult:
-        payload: dict = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            # OpenRouter liefert damit die Kosten in "usage" mit; andere APIs ignorieren es
-            "usage": {"include": True},
-        }
+        payload: dict = {"model": model, "messages": messages, "temperature": temperature}
+        if self.is_openrouter:
+            # OpenRouter liefert damit die Kosten in "usage" mit (andere APIs lehnen das Feld teils ab)
+            payload["usage"] = {"include": True}
         if max_tokens:
             payload["max_tokens"] = max_tokens
         started = time.monotonic()
@@ -161,6 +158,23 @@ class LLMClient:
         usage = Usage.from_response(data.get("usage"))
         self.stats.ok(model, latency_ms, usage)
         return ChatResult(text=content or "", usage=usage, latency_ms=latency_ms)
+
+    async def list_models(self) -> list[str]:
+        """Verfügbare Modelle des Anbieters (GET /models)."""
+        try:
+            response = await self._http.get("/models", timeout=20)
+        except httpx.HTTPError as exc:
+            raise LLMError(f"Anbieter nicht erreichbar ({self.base_url}): {type(exc).__name__} {exc}") from exc
+        if response.status_code >= 400:
+            raise LLMError(f"Anbieter antwortet mit {response.status_code}: {response.text[:300]}")
+        try:
+            data = response.json()
+            items = data.get("data", data.get("models", [])) if isinstance(data, dict) else data
+            names = [str(m.get("id") or m.get("name")) for m in items if isinstance(m, dict)]
+        except (ValueError, AttributeError) as exc:
+            raise LLMError(f"Unerwartete Modellliste: {response.text[:200]}") from exc
+        # Google liefert "models/gemini-...", der Chat-Endpunkt erwartet den Namen ohne Präfix
+        return sorted({n.removeprefix("models/") for n in names if n and n != "None"})
 
     async def transcribe(
         self, model: str, audio: bytes, filename: str = "voice.ogg",

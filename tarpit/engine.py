@@ -39,6 +39,7 @@ from .media import (
     strip_image_markers,
 )
 from .notify import Notifier
+from .providers import LOCAL_KINDS
 from .prompts import SKIP_TOKEN, build_messages, build_opening_messages
 from .referrals import Candidate, extract_candidates, normalize_phone
 from .safety import check_reply, clean_reply, split_reply
@@ -48,6 +49,13 @@ log = logging.getLogger(__name__)
 
 HISTORY_IMPORT_LIMIT = 50
 QR_WAIT_SECONDS = 20  # QR-Tokens gelten ca. 30 Sekunden
+# Rolle -> (Einstellung für den Anbieter, Einstellung für das Modell)
+ROLE_SETTINGS = {
+    "reply": ("model_provider", "model"),
+    "analysis": ("analysis_provider", "analysis_model"),
+    "vision": ("vision_provider", "vision_model"),
+    "stt": ("stt_provider", "stt_model"),
+}
 DRAFT_DEBOUNCE = 6.0  # Sekunden warten, falls der Scammer mehrere Nachrichten am Stück schickt
 # Im Automatikmodus entsteht der Entwurf erst kurz vor dem Senden. Schreibt der
 # Scammer bis dahin weiter, muss nicht jedes Mal neu generiert werden (spart Tokens).
@@ -140,7 +148,8 @@ class Tarpit:
         self.config = config
         self.db = db
         self.client = TelegramClient(str(config.session_path), config.api_id, config.api_hash)
-        self.llm = LLMClient(config.llm_base_url, config.llm_api_key)
+        self.llm = LLMClient(config.llm_base_url, config.llm_api_key)  # Standard aus der .env
+        self._clients: dict[int, tuple[tuple, LLMClient]] = {}         # Anbieter-ID -> (Konfiguration, Client)
         self.notifier = Notifier(config.notify_bot_token, config.notify_chat_id, config.public_url)
         self.me: User | None = None
         self.rng = random.Random()
@@ -360,6 +369,8 @@ class Tarpit:
                 task.cancel()
             tasks.clear()
         await self.llm.aclose()
+        for _, client in self._clients.values():
+            await client.aclose()
         await self.notifier.aclose()
         await self.client.disconnect()
 
@@ -816,14 +827,55 @@ class Tarpit:
                     + usage.completion * settings["price_output_per_m"]) / 1_000_000
         self.db.add_usage(model, purpose, usage.prompt, usage.cached, usage.completion, cost, chat_id)
 
+    def client_for(self, provider_id) -> LLMClient:
+        """LLM-Client für einen Anbieter; leer oder unbekannt = Standard aus der .env."""
+        provider = self.db.provider(int(provider_id)) if str(provider_id or "").isdigit() else None
+        if provider is None:
+            return self.llm
+        key = (provider["base_url"], provider["api_key"], provider["kind"])
+        cached = self._clients.get(provider["id"])
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        if cached is not None:
+            try:
+                asyncio.get_running_loop().create_task(cached[1].aclose())
+            except RuntimeError:
+                pass  # keine laufende Loop (z. B. Tests): Verbindung wird beim Aufräumen geschlossen
+        timeout = 300 if provider["kind"] in LOCAL_KINDS else 120  # lokale Modelle sind oft langsam
+        client = LLMClient(provider["base_url"], provider["api_key"], timeout=timeout)
+        self._clients[provider["id"]] = (key, client)
+        return client
+
+    def route(self, purpose: str) -> tuple[LLMClient, str]:
+        """Welcher Anbieter und welches Modell ist für diesen Zweck zuständig?"""
+        settings = self.db.settings()
+        role = purpose if purpose in ROLE_SETTINGS else "reply"
+        if role == "analysis" and not settings["analysis_model"]:
+            role = "reply"  # keine eigene Analyse-Einstellung: wie die Antworten
+        provider_key, model_key = ROLE_SETTINGS[role]
+        return self.client_for(settings[provider_key]), settings[model_key]
+
     async def _llm(
-        self, purpose: str, model: str, messages: list[dict], temperature: float,
+        self, purpose: str, messages: list[dict], temperature: float,
         max_tokens: int | None = None, chat_id: int | None = None,
     ) -> ChatResult:
         await self._check_token_limit(purpose)
-        result = await self.llm.complete(model, messages, temperature, max_tokens)
+        client, model = self.route(purpose)
+        result = await client.complete(model, messages, temperature, max_tokens)
         self._record_usage(model, purpose, result.usage, chat_id)
         return result
+
+    async def test_provider(self, provider_id: int) -> tuple[bool, str, list[str]]:
+        """Fragt die Modellliste ab: zeigt, ob Adresse und Schlüssel stimmen (kostet keine Tokens)."""
+        client = self.client_for(provider_id)
+        started = time.monotonic()
+        try:
+            models = await client.list_models()
+        except LLMError as exc:
+            _log(logging.WARNING, "llm", "Anbieter-Test fehlgeschlagen: %s", exc)
+            return False, str(exc), []
+        ms = int((time.monotonic() - started) * 1000)
+        return True, f"{len(models)} Modelle gefunden, Antwort in {ms} ms", models
 
     async def _generate(
         self, chat_id: int, persona_prompt: str, history, settings, instruction: str | None = None,
@@ -844,7 +896,7 @@ class Tarpit:
         for attempt in range(1, 3):
             try:
                 result = await self._llm(
-                    "reply", settings["model"], messages, settings["temperature"],
+                    "reply", messages, settings["temperature"],
                     max_tokens=settings["max_reply_tokens"] or None, chat_id=chat_id,
                 )
             except LLMError as exc:
@@ -895,9 +947,7 @@ class Tarpit:
             if not history:
                 return
             basis = self.db.last_message_id(chat_id)
-            settings = self.db.settings()
-            model = settings["analysis_model"] or settings["model"]
-            result = await self._llm("analysis", model, build_analysis_messages(history), 0.3,
+            result = await self._llm("analysis", build_analysis_messages(history), 0.3,
                                      max_tokens=700, chat_id=chat_id)
             data = parse_analysis(result.text)
             now = time.time()
@@ -938,7 +988,7 @@ class Tarpit:
         model = self.db.settings()["vision_model"]
         if not model:
             return None
-        result = await self._llm("vision", model, build_vision_messages(image, prompt), 0.2,
+        result = await self._llm("vision", build_vision_messages(image, prompt), 0.2,
                                  max_tokens=300, chat_id=chat_id)
         _log(logging.INFO, "llm", "Bild erkannt: %s", result.usage.describe(), chat_id=chat_id)
         return " ".join(result.text.split())
@@ -951,13 +1001,18 @@ class Tarpit:
             return None
         if settings["stt_backend"] == "whisper":
             await self._check_token_limit("stt")
-            text = await self.llm.transcribe(
-                model, audio, base_url=self.config.stt_base_url or None,
-                api_key=self.config.stt_api_key or self.config.llm_api_key or None,
-            )
+            client, _ = self.route("stt")
+            if client is self.llm:
+                # Standard: eigener Whisper-Endpunkt aus der .env, sonst die normale API
+                text = await client.transcribe(
+                    model, audio, base_url=self.config.stt_base_url or None,
+                    api_key=self.config.stt_api_key or self.config.llm_api_key or None,
+                )
+            else:
+                text = await client.transcribe(model, audio)
             self.db.add_usage(model, "stt", 0, 0, 0, 0.0, chat_id)
         else:
-            result = await self._llm("stt", model, build_stt_messages(audio, "ogg"), 0.0,
+            result = await self._llm("stt", build_stt_messages(audio, "ogg"), 0.0,
                                      max_tokens=800, chat_id=chat_id)
             text = result.text
         _log(logging.INFO, "llm", "Sprachnachricht transkribiert (%d Zeichen)", len(text), chat_id=chat_id)
@@ -1204,14 +1259,15 @@ class Tarpit:
         return result
 
     def health(self) -> dict:
-        stats = self.llm.stats
+        reply_client, _ = self.route("reply")
+        stats = reply_client.stats
         return {
             "telegram_connected": self.client.is_connected(),
             "telegram_authorized": self.authorized,
             "me": display_name(self.me) if self.me else None,
             "llm_healthy": stats.healthy,
             "llm": stats,
-            "llm_base_url": self.llm.base_url,
+            "llm_base_url": reply_client.base_url,
             "timers": len(self.timers),
             "drafting": sum(1 for t in self.drafting.values() if not t.done()),
             "sending": len(self.sending),
@@ -1227,7 +1283,7 @@ class Tarpit:
         started = time.monotonic()
         try:
             reply = (await self._llm(
-                "other", settings["model"], [{"role": "user", "content": "Antworte nur mit dem Wort: OK"}], 0.0,
+                "other", [{"role": "user", "content": "Antworte nur mit dem Wort: OK"}], 0.0,
                 max_tokens=5,
             )).text
         except LLMError as exc:

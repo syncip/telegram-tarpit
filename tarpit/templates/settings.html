@@ -1,28 +1,53 @@
 {% extends "base.html" %}
 {% block title %}Einstellungen – Telegram Tarpit{% endblock %}
+{% block page %}settings{% endblock %}
 {% block content %}
 <h1>Einstellungen</h1>
 {% if saved %}<p class="banner ok">Gespeichert.</p>{% endif %}
 <form method="post" action="/settings" class="stack narrow">
   <fieldset>
-    <legend>Modell</legend>
-    <label>Modell-ID <input type="text" name="model" value="{{ settings.model }}"></label>
-    <p class="muted small">API: {{ llm_base_url }}. Bei OpenRouter z. B. <code>openai/gpt-4o-mini</code>, <code>meta-llama/llama-3.3-70b-instruct</code>; siehe openrouter.ai/models.</p>
-    <label>Temperatur (0–2) <input type="text" name="temperature" value="{{ settings.temperature }}"></label>
-    <label>Max. Länge einer Antwort (Token) <input type="number" name="max_reply_tokens" value="{{ settings.max_reply_tokens }}"></label>
-  </fieldset>
-  <fieldset>
-    <legend>Bild- und Spracherkennung</legend>
-    <p class="muted small">Diese Modelle arbeiten dem Antwortmodell zu: Fotos und Sprachnachrichten des Scammers werden in Text umgewandelt, den die KI dann „sieht“. Leer = aus. Nur in Chats, die die KI übernommen hat.</p>
-    <label>Modell für Bilderkennung <input type="text" name="vision_model" value="{{ settings.vision_model }}" placeholder="z. B. ein bildfähiges Modell wie openai/gpt-4o-mini"></label>
-    <label>Modell für Spracherkennung <input type="text" name="stt_model" value="{{ settings.stt_model }}" placeholder="z. B. ein Modell mit Audio-Eingang oder whisper-1"></label>
+    <legend>Modelle &amp; Anbieter</legend>
+    <p class="muted small">Jede Aufgabe kann einen eigenen Anbieter und ein eigenes Modell nutzen, z. B. Antworten lokal mit Ollama und die Bilderkennung bei Google. Anbieter verwaltest du unter <a href="/anbieter">Anbieter</a>.</p>
+    <div class="table-wrap">
+    <table class="roles">
+      <thead><tr><th>Aufgabe</th><th>Anbieter</th><th>Modell</th></tr></thead>
+      <tbody>
+      {% for role, provider_key, model_key, placeholder in [
+          ('🤖 Antworten', 'model_provider', 'model', 'z. B. openai/gpt-4o-mini oder gemma3:4b'),
+          ('🧭 Analyse', 'analysis_provider', 'analysis_model', 'leer = wie Antworten'),
+          ('🖼 Bilderkennung', 'vision_provider', 'vision_model', 'leer = aus'),
+          ('🎙 Spracherkennung', 'stt_provider', 'stt_model', 'leer = aus'),
+        ] %}
+        <tr>
+          <td>{{ role }}</td>
+          <td>
+            <select name="{{ provider_key }}" data-model-input="{{ model_key }}" aria-label="Anbieter für {{ role }}">
+              <option value="" {{ 'selected' if not settings[provider_key] }}>Standard (.env)</option>
+              {% for pr in providers %}
+                <option value="{{ pr.id }}" {{ 'selected' if settings[provider_key] == pr.id | string }}>{{ pr.name }}</option>
+              {% endfor %}
+            </select>
+          </td>
+          <td><input type="text" name="{{ model_key }}" id="input-{{ model_key }}" value="{{ settings[model_key] }}"
+                     placeholder="{{ placeholder }}" list="models-{{ settings[provider_key] or 'env' }}" autocomplete="off"></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% for key, models in model_lists.items() %}
+      <datalist id="models-{{ key }}">{% for m in models %}<option value="{{ m }}">{% endfor %}</datalist>
+    {% endfor %}
+    <p class="muted small">Modellvorschläge erscheinen, sobald du einen Anbieter unter <a href="/anbieter">Anbieter</a> einmal getestet hast. Standard (.env): <code>{{ llm_base_url }}</code>.</p>
     <label>Art der Spracherkennung
       <select name="stt_backend">
-        <option value="chat" {{ 'selected' if settings.stt_backend == 'chat' }}>Chat-API mit Audio (z. B. über OpenRouter)</option>
+        <option value="chat" {{ 'selected' if settings.stt_backend == 'chat' }}>Chat-API mit Audio (Modelle mit Audio-Eingang)</option>
         <option value="whisper" {{ 'selected' if settings.stt_backend == 'whisper' }}>Whisper-Endpunkt /audio/transcriptions (OpenAI, Groq, lokal)</option>
       </select>
     </label>
-    <p class="muted small">Für Whisper bei einem anderen Anbieter: <code>STT_BASE_URL</code> und <code>STT_API_KEY</code> in der <code>.env</code> setzen. Die Bilderkennung beschreibt auch automatisch hochgeladene Persona-Bilder.</p>
+    <label>Temperatur (0–2) <input type="text" name="temperature" value="{{ settings.temperature }}"></label>
+    <label>Max. Länge einer Antwort (Token) <input type="number" name="max_reply_tokens" value="{{ settings.max_reply_tokens }}"></label>
+    <p class="muted small">Bild- und Spracherkennung arbeiten dem Antwortmodell zu: Fotos und Sprachnachrichten des Scammers werden in Text umgewandelt (nur in KI-Chats). Die Bilderkennung beschreibt auch hochgeladene Persona-Bilder.</p>
   </fieldset>
   <fieldset id="limits">
     <legend>Token-Limit &amp; Kosten</legend>
@@ -35,7 +60,6 @@
     <legend>Analyse (Lage, Schlagworte, Best-of)</legend>
     <label class="check"><input type="checkbox" name="auto_analyze" value="1" {{ 'checked' if settings.auto_analyze }}> Automatisch analysieren</label>
     <label>Neu analysieren nach so vielen neuen Nachrichten <input type="number" name="analyze_every" min="1" value="{{ settings.analyze_every }}"></label>
-    <label>Modell für die Analyse (leer = gleiches Modell) <input type="text" name="analysis_model" value="{{ settings.analysis_model }}" placeholder="z. B. ein günstigeres Modell"></label>
   </fieldset>
   <fieldset>
     <legend>Tarpit-Timing</legend>

@@ -8,7 +8,7 @@ Jede Minute, die ein Betrüger mit „Gerda, 78“ verbringt, fehlt ihm bei echt
 - **Tarpit-Timing:** zufällige, log-uniform verteilte Antwortzeiten (meist Minuten, manchmal Stunden), Nachtruhe, „gelesen“-Haken, Tipp-Indikator
 - **Sicherheitsfilter im Code:** Antworten mit Links, E-Mail-Adressen, IBANs, langen Ziffernfolgen (Telefon-/Kartennummern) oder „ich bin eine KI“ werden nie gesendet
 - **Kostenbremse:** Tageslimit pro Chat, Not-Aus für alles
-- **Beliebiges LLM** über OpenRouter oder jede andere OpenAI-kompatible API (auch lokal mit Ollama)
+- **Beliebige Modelle:** OpenRouter, OpenAI, Google Gemini, Groq oder **lokal** mit Ollama/LM Studio, pro Aufgabe wählbar
 
 > ⚠️ Die App meldet sich als **dein Telegram-Account** an (Userbot über die MTProto-API, mit Telethon).
 > Telegram sperrt automatisierte Accounts gelegentlich, und Scammer melden dich eventuell.
@@ -120,6 +120,62 @@ ohne Push, weil die Nachricht von dir selbst kommt. Für **Push-Benachrichtigung
 3. Deinen neuen Bot in Telegram öffnen und einmal **Start** drücken.
 4. Unter *Log & Status* → **🔔 Test-Benachrichtigung senden** prüfen.
 
+### Freigaben
+
+Im Modus 👀 „KI schlägt vor“ (oder nach einer Weiterleitung) erscheint oben auf der Chat-Seite eine Karte
+**„Diese Antwort wartet auf deine Freigabe“** mit **✅ Freigeben & senden**, **❌ Ablehnen** und
+**🔄 Neu generieren** (optional mit Hinweis, was anders sein soll). Alle offenen Freigaben stehen außerdem in der
+Übersicht.
+
+### Bilder der Persona
+
+Unter **Personas** kannst du jeder Persona Bilder geben, zum Beispiel Katze, Garten oder ein verwackeltes Foto.
+Nimm nur eigene oder harmlose Bilder, keine Fotos anderer echter Menschen. Beim Hochladen werden **Metadaten
+wie der GPS-Standort entfernt**. Fragt der Scammer nach Fotos, kann die KI eines schicken (`[BILD:nr]` im
+Entwurf), jedes höchstens einmal pro Chat. Im Entwurf siehst du eine Vorschau und kannst Bilder per Klick
+einfügen. Ist eine Bilderkennung eingestellt, wird die Beschreibung beim Hochladen automatisch erzeugt.
+
+### Bild- und Spracherkennung
+
+Optional wandeln eigene Modelle Fotos und Sprachnachrichten des Scammers in Text um, den das Antwortmodell dann
+„sieht“: `[Foto: Screenshot einer Krypto-App mit 50.000 USDT]` oder `[Sprachnachricht: „…“]`. Das passiert nur
+in Chats, die die KI übernommen hat. Spracherkennung geht entweder über ein Chat-Modell mit Audio-Eingang oder
+über einen Whisper-Endpunkt (`/audio/transcriptions`, z. B. OpenAI `whisper-1` oder Groq `whisper-large-v3`).
+Nicht jedes Modell versteht Audio. Klappt es nicht, steht der Grund im Log.
+
+### Anbieter & lokale Modelle
+
+Unter **Anbieter** legst du beliebig viele KI-Anbieter an. Vorlagen gibt es für OpenRouter, OpenAI, Google Gemini,
+Groq, Ollama, LM Studio und eigene OpenAI-kompatible Adressen. **🩺 Testen** lädt die Modellliste (kostet keine
+Tokens), die dann in den Einstellungen als Vorschläge erscheint. Unter **Einstellungen → Modelle & Anbieter**
+bekommt jede Aufgabe (Antworten, Analyse, Bilderkennung, Spracherkennung) ihren Anbieter und ihr Modell.
+Der Anbieter aus der `.env` bleibt als „Standard“ erhalten.
+
+**Lokale Modelle** (kostenlos, nichts verlässt deinen Rechner):
+
+```bash
+# Ollama gleich im Docker-Setup mitstarten ...
+docker compose --profile local up -d
+docker compose exec ollama ollama pull gemma3:4b
+# -> Anbieter „Ollama (lokal)“ mit Adresse http://ollama:11434/v1
+
+# ... oder ein bereits installiertes Ollama auf dem Rechner nutzen:
+ollama pull gemma3:4b
+# -> Adresse http://host.docker.internal:11434/v1 (ohne Docker: http://localhost:11434/v1)
+```
+
+Welche Modelle es gibt, zeigt ollama.com/library. Kleine Modelle mit 2–4 Mrd. Parametern laufen auch ohne
+Grafikkarte, brauchen dann aber oft 10–60 Sekunden pro Antwort, was beim Tarpit nicht stört. Sie halten die Rolle
+weniger zuverlässig als große Modelle. Die Sicherheitsfilter der App gelten trotzdem.
+
+### Verbrauch & Token-Limit
+
+Die Seite **Verbrauch** zeigt Tokens pro Tag (nach Antworten, Analyse, Bild- und Spracherkennung), Kosten pro Tag,
+den Verbrauch pro Modell, den Cache-Anteil und eine **Hochrechnung für den Monat** (aus dem Schnitt der letzten
+7 Tage). Unter Einstellungen lässt sich ein **Tageslimit für alle Aufrufe zusammen** setzen. Ist es erreicht,
+pausiert die KI bis Mitternacht und du wirst benachrichtigt. OpenRouter meldet die echten Kosten. Für andere
+Anbieter kannst du Preise pro 1 Mio. Token eintragen, dann wird geschätzt. Lokale Modelle kosten nichts.
+
 ### Übersicht & Best-of
 
 Statusleiste (Telegram, KI-Modell, Probleme, Token/Kosten heute), Chatliste mit Live-Countdown und ⚡-Knopf,
@@ -195,5 +251,8 @@ Aufbau:
 | `tarpit/logs.py` | Log-Einträge für die Statusseite |
 | `tarpit/referrals.py` | Erkennung von Weiterleitungen (@Namen, t.me-Links, Telefonnummern) |
 | `tarpit/notify.py` | Benachrichtigungen per Telegram (Bot oder Gespeicherte Nachrichten) |
+| `tarpit/media.py` | Bild-Upload (ohne Metadaten), Bild-/Spracherkennung, Bild-Marker |
+| `tarpit/providers.py` | Vorlagen für KI-Anbieter |
+| `tarpit/usage.py` | Verbrauchsauswertung und Monats-Hochrechnung |
 | `tarpit/web.py` + `templates/` + `static/` | Webinterface (FastAPI, Jinja2, etwas JavaScript) |
 | `tarpit/db.py` | SQLite-Speicher |

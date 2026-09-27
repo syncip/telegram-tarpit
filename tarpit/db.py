@@ -77,6 +77,16 @@ CREATE TABLE IF NOT EXISTS analysis_history (
 );
 CREATE INDEX IF NOT EXISTS idx_analysis_history_chat ON analysis_history (chat_id, ts);
 
+-- KI-Anbieter (OpenAI-kompatible APIs: OpenRouter, OpenAI, Google, Ollama, ...)
+CREATE TABLE IF NOT EXISTS providers (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    base_url    TEXT NOT NULL,
+    api_key     TEXT NOT NULL DEFAULT '',
+    created_at  REAL NOT NULL
+);
+
 -- Bilder, die eine Persona verschicken kann
 CREATE TABLE IF NOT EXISTS persona_images (
     id          INTEGER PRIMARY KEY,
@@ -160,6 +170,11 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "referral_min_delay": "120",
     "referral_max_delay": "900",
     "notify_enabled": "1",
+    # Anbieter je Rolle: ID aus der Tabelle providers, leer = Standard aus der .env
+    "model_provider": "",
+    "analysis_provider": "",
+    "vision_provider": "",
+    "stt_provider": "",
     "vision_model": "",           # leer = aus; z. B. ein bildfähiges Modell
     "stt_model": "",              # leer = aus; Spracherkennung
     "stt_backend": "chat",        # chat (Audio über die Chat-API) | whisper (/audio/transcriptions)
@@ -314,6 +329,45 @@ class Database:
     def delete_persona_image(self, image_id: int) -> None:
         with self.conn:
             self.conn.execute("DELETE FROM persona_images WHERE id = ?", (image_id,))
+
+    # --- Anbieter ------------------------------------------------------------
+
+    def providers(self) -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM providers ORDER BY id").fetchall()
+
+    def provider(self, provider_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM providers WHERE id = ?", (provider_id,)).fetchone()
+
+    def save_provider(
+        self, provider_id: int | None, name: str, kind: str, base_url: str, api_key: str | None
+    ) -> int:
+        """Legt einen Anbieter an oder ändert ihn. api_key=None behält den gespeicherten Schlüssel."""
+        with self.conn:
+            if provider_id is None:
+                cur = self.conn.execute(
+                    "INSERT INTO providers (name, kind, base_url, api_key, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (name, kind, base_url, api_key or "", time.time()),
+                )
+                return int(cur.lastrowid)
+            if api_key is None:
+                self.conn.execute(
+                    "UPDATE providers SET name = ?, kind = ?, base_url = ? WHERE id = ?",
+                    (name, kind, base_url, provider_id),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE providers SET name = ?, kind = ?, base_url = ?, api_key = ? WHERE id = ?",
+                    (name, kind, base_url, api_key, provider_id),
+                )
+            return provider_id
+
+    def delete_provider(self, provider_id: int) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM providers WHERE id = ?", (provider_id,))
+            # Rollen, die diesen Anbieter nutzen, fallen auf den Standard zurück
+            self.conn.execute(
+                "UPDATE settings SET value = '' WHERE key LIKE '%_provider' AND value = ?", (str(provider_id),)
+            )
 
     def sent_image_ids(self, chat_id: int) -> set[int]:
         rows = self.conn.execute(

@@ -386,3 +386,58 @@ def test_usage_page_and_limit_settings(client):
     assert "Hochrechnung Monat" in page and "openai/gpt-4o-mini" in page and "1.250" in page
     assert "50.000" in page  # Limit
     assert "1.250 Token heute" in client.get("/").text
+
+
+
+def test_providers_page_add_edit_test_and_settings(client, monkeypatch):
+    from tarpit.llm import LLMClient
+
+    async def fake_list_models(self):
+        return ["gemma3:4b", "llama3.2:3b"]
+
+    monkeypatch.setattr(LLMClient, "list_models", fake_list_models)
+    t = engine(client)
+    assert "Standard (.env)" in client.get("/anbieter").text
+
+    client.post("/anbieter", data={"name": "Mein Ollama", "kind": "ollama",
+                                   "base_url": "http://host.docker.internal:11434/v1/", "api_key": ""})
+    client.post("/anbieter", data={"name": "OpenAI", "kind": "openai", "base_url": "https://api.openai.com/v1",
+                                   "api_key": "sk-supergeheim1234"})
+    ollama, openai = t.db.providers()
+    assert ollama["base_url"] == "http://host.docker.internal:11434/v1"  # Schrägstrich am Ende entfernt
+    page = client.get("/anbieter").text
+    assert "Mein Ollama" in page and "••••1234" in page and "sk-supergeheim" not in page  # Schlüssel maskiert
+
+    client.post("/anbieter", data={"provider_id": str(openai["id"]), "name": "OpenAI", "kind": "openai",
+                                   "base_url": "https://api.openai.com/v1", "api_key": ""})
+    assert t.db.provider(openai["id"])["api_key"] == "sk-supergeheim1234"  # leer = behalten
+    assert "http:// oder https://" in client.post("/anbieter", data={
+        "name": "x", "kind": "custom", "base_url": "ftp://x"}).text
+
+    client.post(f"/anbieter/{ollama['id']}/test")
+    assert "2 Modelle gefunden" in client.get("/anbieter").text
+
+    client.post("/settings", data={"model_provider": str(ollama["id"]), "model": "gemma3:4b",
+                                   "vision_provider": "999"})  # unbekannte ID wird ignoriert
+    s = t.db.settings()
+    assert s["model_provider"] == str(ollama["id"]) and s["model"] == "gemma3:4b" and s["vision_provider"] == ""
+    settings_page = client.get("/settings").text
+    assert f'<datalist id="models-{ollama["id"]}">' in settings_page and 'value="llama3.2:3b"' in settings_page
+    assert t.route("reply")[0].base_url == "http://host.docker.internal:11434/v1"
+
+    client.post(f"/anbieter/{ollama['id']}/delete")
+    assert t.db.settings()["model_provider"] == ""
+
+
+def test_approval_card_on_chat_and_overview(client):
+    t = engine(client)
+    t.db.update_chat(CHAT, enabled=True, mode="review", draft_text="moment ich such meine brille", draft_basis=10**9)
+    page = client.get("/chats/1").text
+    card = page[page.index('id="approval"'):page.index('id="approval"') + 400]
+    assert "hidden" not in card.split(">")[0]
+    assert "✅ Freigeben &amp; senden" in page and "❌ Ablehnen" in page and "🔄 Neu generieren" in page
+    index = client.get("/").text
+    assert "Wartet auf deine Freigabe (1)" in index and "moment ich such meine brille" in index
+    r = client.post("/chats/1/draft/discard", data={"next": "/"}, follow_redirects=False)
+    assert r.headers["location"] == "/" and t.db.chat(CHAT)["draft_text"] is None
+    assert "Wartet auf deine Freigabe" not in client.get("/").text

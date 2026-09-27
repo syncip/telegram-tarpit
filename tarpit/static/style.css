@@ -222,3 +222,24 @@ input, select, textarea, button { max-width: 100%; }
 .thumb-btn img { width: 44px; height: 44px; object-fit: cover; border-radius: 5px; display: block; }
 .upload input[type=file] { max-width: 220px; font-size: .85rem; }
 #draft-images:empty { display: none; }
+
+table.roles { width: 100%; border-collapse: collapse; }
+table.roles th, table.roles td { text-align: left; padding: 4px 6px 4px 0; vertical-align: middle; }
+table.roles th { font-size: .8rem; color: var(--muted); font-weight: 600; }
+table.roles input, table.roles select { width: 100%; min-width: 140px; }
+.model-list { max-height: 180px; overflow-y: auto; line-height: 1.9; margin-top: 6px; }
+
+.approval { border: 2px solid var(--series-them); }
+.approval-text { white-space: pre-wrap; background: var(--ai); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; margin: 10px 0; }
+.approval-actions { margin-top: 4px; }
+.approvals { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+#approval-images:empty { display: none; }
+
+/* --- schmale Bildschirme ---------------------------------------------------------- */
+.topbar nav { flex-wrap: wrap; row-gap: 4px; }
+fieldset { min-width: 0; }
+table.kv td { overflow-wrap: anywhere; }
+.table-view { overflow-x: auto; max-width: 100%; }
+code { overflow-wrap: anywhere; }
+input[type=url] { font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--text); }
+table.roles td:first-child { white-space: nowrap; }

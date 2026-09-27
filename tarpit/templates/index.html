@@ -100,6 +100,24 @@
   <div class="card">{{ chart_wasted | safe }}</div>
 </section>
 
+{% if approvals %}
+<h2>👀 Wartet auf deine Freigabe ({{ approvals | length }})</h2>
+<div class="approvals">
+  {% for c in approvals %}
+  <div class="card approval">
+    <div class="row between"><a href="/chats/{{ c.chat_id }}"><strong>{{ c.title }}</strong></a><span class="muted small">Entwurf {{ c.draft_at | ago }}</span></div>
+    <div class="approval-text">{{ c.draft_text }}</div>
+    <div class="row">
+      <form method="post" action="/chats/{{ c.chat_id }}/reply-now"><input type="hidden" name="next" value="/"><button class="btn primary">✅ Freigeben</button></form>
+      <form method="post" action="/chats/{{ c.chat_id }}/draft/discard"><input type="hidden" name="next" value="/"><button class="btn danger">❌ Ablehnen</button></form>
+      <form method="post" action="/chats/{{ c.chat_id }}/draft/regenerate"><input type="hidden" name="next" value="/"><button class="btn">🔄 Neu generieren</button></form>
+      <a class="btn" href="/chats/{{ c.chat_id }}">✏️ Bearbeiten</a>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
 {% if referrals %}
 <h2>↪ Weiterleitungen</h2>
 <div class="card">

@@ -1,0 +1,8 @@
+{% if test %}
+  <p class="banner small {{ 'ok' if test.ok else '' }}">{{ '✅' if test.ok else '❌' }} {{ test.message }} <span class="muted">({{ test.at | tsfull }})</span></p>
+  {% if test.models %}
+    <details class="small"><summary>{{ test.models | length }} Modelle anzeigen</summary>
+      <div class="model-list">{% for m in test.models[:300] %}<code>{{ m }}</code> {% endfor %}</div>
+    </details>
+  {% endif %}
+{% endif %}

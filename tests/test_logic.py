@@ -229,3 +229,49 @@ def test_usage_report_projection(tmp_path):
     assert report["calls"]["reply"] == 7 and report["calls"]["analysis"] == 1
     assert report["per_reply"] == round((7 * 800 + 400 + 7 * 200 + 100) / 7)
     assert "s-c1" in report["chart_tokens"] and "s-c2" in report["chart_tokens"]
+
+
+
+def _client_with(handler, base_url):
+    import httpx
+
+    from tarpit.llm import LLMClient
+
+    client = LLMClient(base_url, "key")
+    client._http = httpx.AsyncClient(base_url=base_url, transport=httpx.MockTransport(handler),
+                                     headers=client._http.headers)
+    return client
+
+
+def test_llm_client_sends_openrouter_extras_only_to_openrouter():
+    import asyncio
+    import json
+
+    import httpx
+
+    seen = []
+
+    def handler(request):
+        seen.append((str(request.url), json.loads(request.content), dict(request.headers)))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}],
+                                         "usage": {"prompt_tokens": 3, "completion_tokens": 1}})
+
+    for base in ("https://openrouter.ai/api/v1", "https://api.openai.com/v1"):
+        asyncio.run(_client_with(handler, base).complete("m", [{"role": "user", "content": "hi"}], 0.5, 10))
+    (url_or, body_or, headers_or), (url_oa, body_oa, headers_oa) = seen
+    assert url_or.endswith("/chat/completions") and body_or["usage"] == {"include": True}
+    assert "x-title" in headers_or and headers_or["authorization"] == "Bearer key"
+    assert "usage" not in body_oa and "x-title" not in headers_oa  # OpenAI lehnt unbekannte Felder ab
+
+
+def test_list_models_handles_google_prefix():
+    import asyncio
+
+    import httpx
+
+    def handler(request):
+        assert request.url.path.endswith("/models")
+        return httpx.Response(200, json={"data": [{"id": "models/gemini-2.5-flash"}, {"id": "gemma3:4b"}]})
+
+    models = asyncio.run(_client_with(handler, "https://x/v1").list_models())
+    assert models == ["gemini-2.5-flash", "gemma3:4b"]

@@ -10,3 +10,18 @@ services:
     ports:
       # nur lokal erreichbar; für Zugriff von außen einen Reverse-Proxy mit HTTPS davorsetzen
       - "127.0.0.1:8080:8080"
+    extra_hosts:
+      # damit lokale Modelle auf dem Rechner (Ollama, LM Studio) unter
+      # http://host.docker.internal:11434 erreichbar sind, auch unter Linux
+      - "host.docker.internal:host-gateway"
+
+  # Optional: lokale Modelle direkt mitstarten
+  #   docker compose --profile local up -d
+  #   docker compose exec ollama ollama pull gemma3:4b
+  # Anbieter in der Oberfläche: "Ollama (lokal)" mit Adresse http://ollama:11434/v1
+  ollama:
+    image: ollama/ollama
+    profiles: ["local"]
+    restart: unless-stopped
+    volumes:
+      - ./data/ollama:/root/.ollama
