@@ -11,6 +11,7 @@ from datetime import datetime
 
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError
+from telethon.tl import functions, types
 from telethon.tl.custom import Message
 from telethon.tl.types import User
 
@@ -24,6 +25,7 @@ from .timing import postpone_quiet_hours, sample_delay, typing_duration
 log = logging.getLogger(__name__)
 
 HISTORY_IMPORT_LIMIT = 50
+QR_WAIT_SECONDS = 20  # QR-Tokens gelten ca. 30 Sekunden
 
 
 @dataclass
@@ -183,27 +185,56 @@ class Tarpit:
 
     @property
     def qr_url(self) -> str | None:
-        return self._qr.url if self._qr is not None else None
+        try:
+            return self._qr.url if self._qr is not None else None
+        except AttributeError:  # Token schon eingelöst, es gibt keinen neuen QR-Code mehr
+            return None
 
     async def _qr_loop(self) -> None:
-        # Der Token im QR-Code läuft nach ca. 30 Sekunden ab und wird dann erneuert.
-        while True:
-            try:
-                await self._qr.wait()
-            except asyncio.TimeoutError:
-                await self._qr.recreate()
-                continue
-            except SessionPasswordNeededError:
-                self.qr_state = "password"
-                return
-            except Exception as exc:
+        try:
+            while True:
+                try:
+                    # Eigenes, festes Timeout statt Telethons Berechnung aus der
+                    # Ablaufzeit: die geht schief, wenn die Uhr des Hosts abweicht.
+                    await self._qr.wait(QR_WAIT_SECONDS)
+                    break
+                except asyncio.TimeoutError:
+                    await self._qr.recreate()
+                    if await self._qr_token_accepted():
+                        break
+        except SessionPasswordNeededError:
+            self.qr_state = "password"
+            return
+        except Exception as exc:
+            if not await self._session_authorized():
                 log.exception("QR-Login fehlgeschlagen")
                 self.qr_state = "error"
                 self.qr_error = str(exc)
                 return
-            self.qr_state = "done"
+        self.qr_state = "done"
+        await self._after_login()
+
+    async def _qr_token_accepted(self) -> bool:
+        """Wurde der QR-Code gescannt, während wir ihn erneuert haben, liefert
+        Telegram statt eines neuen Tokens direkt das Login-Ergebnis zurück."""
+        resp = getattr(self._qr, "_resp", None)
+        if isinstance(resp, types.auth.LoginTokenMigrateTo):
+            # Account liegt in einem anderen Rechenzentrum
+            await self.client._switch_dc(resp.dc_id)
+            resp = await self.client(functions.auth.ImportLoginTokenRequest(resp.token))
+        return isinstance(resp, types.auth.LoginTokenSuccess)
+
+    async def _session_authorized(self) -> bool:
+        try:
+            return await self.client.is_user_authorized()
+        except Exception:
+            return False
+
+    async def refresh_login(self) -> None:
+        """Übernimmt einen Login, der auf Telegram-Seite schon erfolgt ist,
+        den die App aber (noch) nicht mitbekommen hat."""
+        if not self.authorized and await self._session_authorized():
             await self._after_login()
-            return
 
     async def logout(self) -> None:
         self.cancel_all()

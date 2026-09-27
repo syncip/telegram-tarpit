@@ -65,6 +65,9 @@ class FakeTarpit:
         self.qr_url = "tg://login?token=abc"
         self.qr_state = "waiting"
 
+    async def refresh_login(self):
+        pass
+
     def cancel_qr_login(self):
         self.qr_url = None
         self.qr_state = None

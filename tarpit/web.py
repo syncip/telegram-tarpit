@@ -152,6 +152,7 @@ def create_app(config: Config) -> FastAPI:
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_get(request: Request):
+        await tarpit(request).refresh_login()
         if tarpit(request).authorized:
             return back("/")
         tarpit(request).cancel_qr_login()
@@ -188,6 +189,8 @@ def create_app(config: Config) -> FastAPI:
     @app.get("/login/qr", response_class=HTMLResponse)
     async def login_qr(request: Request):
         t = tarpit(request)
+        if t.qr_state == "done" or t.qr_url is None:
+            await t.refresh_login()
         if t.authorized:
             return back("/")
         if t.qr_state == "password":

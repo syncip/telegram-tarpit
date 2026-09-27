@@ -118,19 +118,26 @@ def test_describe_code_type():
     )
 
 
+from telethon.tl.types.auth import LoginTokenSuccess  # noqa: E402
+
+
 class FakeQR:
     def __init__(self, outcomes):
         self.outcomes = list(outcomes)
         self.recreated = 0
         self.url = "tg://login?token=x"
+        self.accept_on_recreate = False
+        self._resp = None
 
-    async def wait(self):
+    async def wait(self, timeout=None):
         outcome = self.outcomes.pop(0)
         if outcome is not None:
             raise outcome
 
     async def recreate(self):
         self.recreated += 1
+        if self.accept_on_recreate:
+            self._resp = LoginTokenSuccess(authorization=None)
 
 
 def test_qr_loop_renews_token_and_logs_in(setup, monkeypatch):
@@ -153,3 +160,35 @@ def test_qr_loop_needs_password(setup):
     t._qr = FakeQR([SessionPasswordNeededError(request=None)])
     asyncio.run(t._qr_loop())
     assert t.qr_state == "password"
+
+
+def test_qr_scanned_while_token_renewed(setup, monkeypatch):
+    """Regression: Scan während der Erneuerung -> recreate() liefert LoginTokenSuccess."""
+    t, _ = setup
+    logged_in = []
+
+    async def fake_after_login():
+        logged_in.append(True)
+
+    monkeypatch.setattr(t, "_after_login", fake_after_login)
+    t._qr = FakeQR([asyncio.TimeoutError()])
+    t._qr.accept_on_recreate = True
+    asyncio.run(t._qr_loop())
+    assert t.qr_state == "done" and logged_in
+
+
+def test_qr_error_but_session_authorized(setup, monkeypatch):
+    t, _ = setup
+    logged_in = []
+
+    async def fake_after_login():
+        logged_in.append(True)
+
+    async def authorized():
+        return True
+
+    monkeypatch.setattr(t, "_after_login", fake_after_login)
+    monkeypatch.setattr(t, "_session_authorized", authorized)
+    t._qr = FakeQR([AttributeError("kaputt")])
+    asyncio.run(t._qr_loop())
+    assert t.qr_state == "done" and logged_in
