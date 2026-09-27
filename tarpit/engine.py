@@ -21,7 +21,8 @@ import json
 import logging
 import random
 import time
-from datetime import datetime
+from datetime import date, datetime
+from pathlib import Path
 
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError
@@ -32,7 +33,11 @@ from telethon.tl.types import User
 from .analysis import build_analysis_messages, parse_analysis
 from .config import Config
 from .db import Database
-from .llm import LLMClient, LLMError
+from .llm import ChatResult, LLMClient, LLMError, Usage
+from .media import (
+    PERSONA_IMAGE_PROMPT, VISION_PROMPT as VISION_PROMPT_FOR_CHAT, asks_for_photo, build_stt_messages, build_vision_messages, image_marker_ids,
+    strip_image_markers,
+)
 from .notify import Notifier
 from .prompts import SKIP_TOKEN, build_messages, build_opening_messages
 from .referrals import Candidate, extract_candidates, normalize_phone
@@ -146,6 +151,7 @@ class Tarpit:
         self.analyzing: dict[int, asyncio.Task] = {}   # erstellt gerade eine Analyse
         self.sending: set[int] = set()                 # tippt/sendet gerade
         self.draft_failed: dict[int, int] = {}         # Chat -> Nachrichten-ID, für die der Entwurf scheiterte
+        self._limit_notified: str | None = None        # Tag, an dem über das Token-Limit informiert wurde
         self._watchdog: asyncio.Task | None = None
         self._was_connected: bool | None = None
         self._login_phone = ""
@@ -395,7 +401,11 @@ class Tarpit:
             return
         msg: Message = event.message
         self.db.upsert_chat(event.chat_id, display_name(sender), sender.username, msg.date.timestamp())
-        self.db.add_message(event.chat_id, "them", describe_message(msg), msg.date.timestamp(), msg.id)
+        text = describe_message(msg)
+        understood = await self._understand_media(event.chat_id, msg)
+        if understood:
+            text = understood
+        self.db.add_message(event.chat_id, "them", text, msg.date.timestamp(), msg.id)
         candidates = extract_candidates(msg.message or "") + message_entity_candidates(msg)
         if candidates:
             # vor der normalen Antwortplanung, damit der Chat ggf. zuerst auf Freigabe gestellt wird
@@ -711,12 +721,36 @@ class Tarpit:
 
             await self._set_online(True)
             parts = split_reply(text)
+            allowed = self.sendable_images(chat_id)
             for i, part in enumerate(parts):
                 if i:
                     await asyncio.sleep(self.rng.uniform(1, 3) if instant else self.rng.uniform(3, 20))
-                await self._type(chat_id, part, instant)
-                sent = await self.client.send_message(chat_id, part)
-                self.db.add_message(chat_id, "ai", part, time.time(), sent.id, edited=edited)
+                caption = strip_image_markers(part)
+                image_ids = [n for n in image_marker_ids(part) if n in allowed]
+                for n in image_marker_ids(part):
+                    if n not in allowed:
+                        _log(logging.WARNING, "engine", "Bild %d nicht verfügbar oder schon geschickt, übersprungen",
+                             n, chat_id=chat_id)
+                if image_ids:
+                    for k, image_id in enumerate(image_ids):
+                        image = allowed.pop(image_id)
+                        text_for_image = caption if k == 0 else ""
+                        async with self.client.action(chat_id, "photo"):
+                            await asyncio.sleep(self.rng.uniform(1, 2) if instant else self.rng.uniform(3, 12))
+                        sent = await self.client.send_file(
+                            chat_id, str(self.image_path(image)), caption=text_for_image or None
+                        )
+                        stored = f"[Bild: {image['description'] or 'Foto'}]" + (f" {text_for_image}" if text_for_image else "")
+                        self.db.add_message(chat_id, "ai", stored, time.time(), sent.id, edited=edited,
+                                            image_id=image_id)
+                        self.db.bump_ai_count(chat_id)
+                        sent_any = True
+                    continue
+                if not caption:
+                    continue
+                await self._type(chat_id, caption, instant)
+                sent = await self.client.send_message(chat_id, caption)
+                self.db.add_message(chat_id, "ai", caption, time.time(), sent.id, edited=edited)
                 self.db.bump_ai_count(chat_id)
                 sent_any = True
             _log(logging.INFO, "telegram", "KI-Antwort gesendet (%d Nachricht%s%s)", len(parts),
@@ -754,19 +788,64 @@ class Tarpit:
         except Exception:
             pass
 
+    # --- KI-Aufrufe (zentral: Tageslimit und Verbrauch) -----------------------
+
+    def tokens_today(self) -> int:
+        return self.db.tokens_on(date.today().isoformat())
+
+    async def _check_token_limit(self, purpose: str) -> None:
+        limit = self.db.settings()["daily_token_limit"]
+        if limit and self.tokens_today() >= limit:
+            today = date.today().isoformat()
+            if self._limit_notified != today:
+                self._limit_notified = today
+                _log(logging.WARNING, "llm", "Token-Tageslimit von %s erreicht, KI pausiert bis morgen", limit)
+                if self.db.settings()["notify_enabled"]:
+                    await self.notifier.send(
+                        self.client, self.me.id if self.me else None,
+                        f"⛽ Token-Tageslimit von {limit:,} erreicht. Die KI pausiert bis Mitternacht."
+                        .replace(",", ".") + self.notifier.link("/verbrauch"),
+                    )
+            raise LLMError(f"Token-Tageslimit von {limit} erreicht ({purpose} nicht ausgeführt)")
+
+    def _record_usage(self, model: str, purpose: str, usage: Usage, chat_id: int | None) -> None:
+        cost = usage.cost
+        settings = self.db.settings()
+        if not cost and (settings["price_input_per_m"] or settings["price_output_per_m"]):
+            cost = (usage.prompt * settings["price_input_per_m"]
+                    + usage.completion * settings["price_output_per_m"]) / 1_000_000
+        self.db.add_usage(model, purpose, usage.prompt, usage.cached, usage.completion, cost, chat_id)
+
+    async def _llm(
+        self, purpose: str, model: str, messages: list[dict], temperature: float,
+        max_tokens: int | None = None, chat_id: int | None = None,
+    ) -> ChatResult:
+        await self._check_token_limit(purpose)
+        result = await self.llm.complete(model, messages, temperature, max_tokens)
+        self._record_usage(model, purpose, result.usage, chat_id)
+        return result
+
     async def _generate(
         self, chat_id: int, persona_prompt: str, history, settings, instruction: str | None = None,
         background: str | None = None,
     ) -> str | None:
-        messages = build_messages(persona_prompt, history, instruction=instruction, background=background)
+        chat = self.db.chat(chat_id)
+        persona = self.db.persona_for_chat(chat) if chat is not None else None
+        images = [(i["id"], i["description"]) for i in self.db.persona_images(persona["id"])] if persona else []
+        last = history[-1] if history else None
+        messages = build_messages(
+            persona_prompt, history, instruction=instruction, background=background, images=images,
+            sent_images=self.db.sent_image_ids(chat_id) & {i for i, _ in images},
+            photo_request=bool(images and last is not None and last["sender"] == "them" and asks_for_photo(last["text"])),
+        )
         return await self._generate_from(chat_id, messages, settings)
 
     async def _generate_from(self, chat_id: int, messages: list[dict[str, str]], settings) -> str | None:
         for attempt in range(1, 3):
             try:
-                result = await self.llm.complete(
-                    settings["model"], messages, settings["temperature"],
-                    max_tokens=settings["max_reply_tokens"] or None,
+                result = await self._llm(
+                    "reply", settings["model"], messages, settings["temperature"],
+                    max_tokens=settings["max_reply_tokens"] or None, chat_id=chat_id,
                 )
             except LLMError as exc:
                 _log(logging.ERROR, "llm", "%s", exc, chat_id=chat_id)
@@ -777,7 +856,7 @@ class Tarpit:
             text = clean_reply(result.text)
             if text == SKIP_TOKEN:
                 return SKIP_TOKEN
-            reason = check_reply(text)
+            reason = check_reply(strip_image_markers(text) or "…")
             if reason is None:
                 return text
             _log(logging.WARNING, "safety", "Antwort blockiert (%s), Versuch %d: %s", reason, attempt, text,
@@ -818,7 +897,8 @@ class Tarpit:
             basis = self.db.last_message_id(chat_id)
             settings = self.db.settings()
             model = settings["analysis_model"] or settings["model"]
-            result = await self.llm.complete(model, build_analysis_messages(history), 0.3, max_tokens=700)
+            result = await self._llm("analysis", model, build_analysis_messages(history), 0.3,
+                                     max_tokens=700, chat_id=chat_id)
             data = parse_analysis(result.text)
             now = time.time()
             self.db.update_chat(
@@ -835,6 +915,88 @@ class Tarpit:
         finally:
             if self.analyzing.get(chat_id) is asyncio.current_task():
                 del self.analyzing[chat_id]
+
+    # --- Bilder & Sprache --------------------------------------------------------
+
+    def image_path(self, image) -> Path:
+        return self.config.media_dir / image["filename"]
+
+    def sendable_images(self, chat_id: int) -> dict[int, object]:
+        """Fotos der Persona dieses Chats, die dort noch nicht geschickt wurden."""
+        chat = self.db.chat(chat_id)
+        persona = self.db.persona_for_chat(chat) if chat is not None else None
+        if persona is None:
+            return {}
+        sent = self.db.sent_image_ids(chat_id)
+        return {
+            i["id"]: i for i in self.db.persona_images(persona["id"])
+            if i["id"] not in sent and self.image_path(i).exists()
+        }
+
+    async def describe_image(self, image: bytes, prompt: str, chat_id: int | None = None) -> str | None:
+        """Bilderkennung; None, wenn kein Bildmodell eingestellt ist."""
+        model = self.db.settings()["vision_model"]
+        if not model:
+            return None
+        result = await self._llm("vision", model, build_vision_messages(image, prompt), 0.2,
+                                 max_tokens=300, chat_id=chat_id)
+        _log(logging.INFO, "llm", "Bild erkannt: %s", result.usage.describe(), chat_id=chat_id)
+        return " ".join(result.text.split())
+
+    async def transcribe(self, audio: bytes, chat_id: int | None = None) -> str | None:
+        """Spracherkennung; None, wenn kein Sprachmodell eingestellt ist."""
+        settings = self.db.settings()
+        model = settings["stt_model"]
+        if not model:
+            return None
+        if settings["stt_backend"] == "whisper":
+            await self._check_token_limit("stt")
+            text = await self.llm.transcribe(
+                model, audio, base_url=self.config.stt_base_url or None,
+                api_key=self.config.stt_api_key or self.config.llm_api_key or None,
+            )
+            self.db.add_usage(model, "stt", 0, 0, 0, 0.0, chat_id)
+        else:
+            result = await self._llm("stt", model, build_stt_messages(audio, "ogg"), 0.0,
+                                     max_tokens=800, chat_id=chat_id)
+            text = result.text
+        _log(logging.INFO, "llm", "Sprachnachricht transkribiert (%d Zeichen)", len(text), chat_id=chat_id)
+        return " ".join(text.split())
+
+    async def _understand_media(self, chat_id: int, msg: Message) -> str | None:
+        """Wandelt Fotos und Sprachnachrichten in Text um, damit die KI darauf eingehen kann.
+
+        Nur in Chats, die die KI übernommen hat (kostet Tokens).
+        """
+        chat = self.db.chat(chat_id)
+        if not self.is_active(chat):
+            return None
+        settings = self.db.settings()
+        is_image = bool(msg.photo) or bool(
+            msg.document and (msg.file.mime_type or "").startswith("image/") and not msg.sticker
+        )
+        is_voice = bool(msg.voice or msg.audio or msg.video_note)
+        if not ((is_image and settings["vision_model"]) or (is_voice and settings["stt_model"])):
+            return None
+        caption = f" {msg.message}" if msg.message else ""
+        try:
+            data = await asyncio.wait_for(self.client.download_media(msg, file=bytes), timeout=60)
+            if is_image:
+                description = await asyncio.wait_for(self.describe_image(data, VISION_PROMPT_FOR_CHAT, chat_id), 120)
+                return f"[Foto: {description}]{caption}" if description else None
+            transcript = await asyncio.wait_for(self.transcribe(data, chat_id), 180)
+            return f"[Sprachnachricht: „{transcript}“]{caption}" if transcript else None
+        except Exception as exc:
+            _log(logging.WARNING, "llm", "%s konnte nicht erkannt werden: %s",
+                 "Bild" if is_image else "Sprachnachricht", exc, chat_id=chat_id)
+            return None
+
+    async def describe_persona_image(self, image: bytes) -> str | None:
+        try:
+            return await self.describe_image(image, PERSONA_IMAGE_PROMPT)
+        except LLMError as exc:
+            _log(logging.WARNING, "llm", "Bildbeschreibung fehlgeschlagen: %s", exc)
+            return None
 
     # --- Weiterleitungen ("Adde sie", "Schreib meinem Manager") ---------------
 
@@ -1023,7 +1185,23 @@ class Tarpit:
             "last_msg_id": self.db.last_message_id(chat_id, include_notes=True),
             "analysis_at": chat["analysis_at"],
             "referred_from": chat["referred_from"],
+            "draft_images": self._draft_images(chat_id, chat["draft_text"]),
         }
+
+    def _draft_images(self, chat_id: int, draft: str | None) -> list[dict]:
+        if not draft:
+            return []
+        allowed = self.sendable_images(chat_id)
+        result = []
+        for image_id in image_marker_ids(draft):
+            image = self.db.persona_image(image_id)
+            result.append({
+                "id": image_id,
+                "url": f"/media/images/{image_id}" if image else None,
+                "description": image["description"] if image else "unbekanntes Bild",
+                "ok": image_id in allowed,
+            })
+        return result
 
     def health(self) -> dict:
         stats = self.llm.stats
@@ -1039,6 +1217,8 @@ class Tarpit:
             "sending": len(self.sending),
             "problems_24h": self.db.problem_count(time.time() - 86400),
             "notify_channel": self.notifier.channel,
+            "tokens_today": self.tokens_today(),
+            "token_limit": self.db.settings()["daily_token_limit"],
             "notify_error": self.notifier.last_error,
         }
 
@@ -1046,10 +1226,10 @@ class Tarpit:
         settings = self.db.settings()
         started = time.monotonic()
         try:
-            reply = await self.llm.chat(
-                settings["model"], [{"role": "user", "content": "Antworte nur mit dem Wort: OK"}], 0.0,
+            reply = (await self._llm(
+                "other", settings["model"], [{"role": "user", "content": "Antworte nur mit dem Wort: OK"}], 0.0,
                 max_tokens=5,
-            )
+            )).text
         except LLMError as exc:
             _log(logging.ERROR, "llm", "Modelltest fehlgeschlagen: %s", exc)
             return False, str(exc)

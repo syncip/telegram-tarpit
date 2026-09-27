@@ -80,7 +80,18 @@
         </p>
         <form method="post" action="/chats/{{ chat.chat_id }}/draft" class="stack">
           <textarea id="draft-text" name="text" rows="4" placeholder="Noch kein Entwurf. Er entsteht, sobald der Scammer schreibt, oder per „Neu generieren“.">{{ status.draft_text or '' }}</textarea>
-          <p class="muted small">Tipp: Mehrere Nachrichten mit einer Zeile <code>---</code> trennen. <code>[SKIP]</code> heißt: bewusst nicht antworten.</p>
+          <div id="draft-images" class="thumbs"></div>
+          {% if sendable_images %}
+          <div class="row small">
+            <span class="muted">📷 Bild einfügen:</span>
+            {% for img in sendable_images %}
+              <button type="button" class="thumb-btn" data-insert-image="{{ img.id }}" data-tip="{{ img.description or 'Foto' }}">
+                <img src="/media/images/{{ img.id }}" alt="{{ img.description }}" loading="lazy">
+              </button>
+            {% endfor %}
+          </div>
+          {% endif %}
+          <p class="muted small">Tipp: Mehrere Nachrichten mit einer Zeile <code>---</code> trennen. <code>[SKIP]</code> heißt: bewusst nicht antworten. <code>[BILD:nr]</code> schickt ein Foto der Persona.</p>
           <div class="row">
             <button class="btn" name="action" value="save">💾 Speichern</button>
             <button class="btn primary" name="action" value="send">⚡ Speichern &amp; sofort senden</button>

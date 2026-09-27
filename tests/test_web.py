@@ -111,7 +111,7 @@ def test_requires_auth(client):
 
 def test_pages_render(client):
     for url in ["/", "/chats/1", "/chats/1/messages", "/chats/1/verlauf", "/chats/1/verlauf/body",
-                "/chats/1/lage", "/personas", "/personas?edit=1", "/settings",
+                "/chats/1/lage", "/personas", "/personas?edit=1", "/settings", "/verbrauch",
                 "/logs", "/logs?level=problems", "/logs?source=llm&chat=1", "/logs/rows"]:
         r = client.get(url)
         assert r.status_code == 200, url
@@ -324,3 +324,65 @@ def test_referral_settings_and_test_notification(client):
     assert s["referral_pause_source"] is True and s["max_reply_tokens"] == 300
     client.post("/logs/test-notify")
     assert any(chat == "me" and "Test" in text for chat, text in engine(client).client.sent)
+
+
+
+def jpeg_bytes(color="orange"):
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 48), color).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_persona_image_upload_serve_and_delete(client):
+    t = engine(client)
+    r = client.post("/personas/1/images", files={"file": ("mausi.png", jpeg_bytes(), "image/png")},
+                    data={"description": "Katze Mausi"}, follow_redirects=False)
+    assert r.status_code == 303
+    image = t.db.persona_images(1)[0]
+    assert image["description"] == "Katze Mausi" and image["filename"].endswith(".jpg")
+    served = client.get(f"/media/images/{image['id']}")
+    assert served.status_code == 200 and served.headers["content-type"] == "image/jpeg"
+    page = client.get("/personas").text
+    assert "Katze Mausi" in page and f"/media/images/{image['id']}" in page
+
+    # Bild erscheint im Chat als einfügbar
+    t.db.update_chat(CHAT, enabled=True)
+    assert f'data-insert-image="{image["id"]}"' in client.get("/chats/1").text
+
+    # kaputte Datei wird abgelehnt
+    r = client.post("/personas/1/images", files={"file": ("x.png", b"kaputt", "image/png")})
+    assert "Keine gültige Bilddatei" in r.text
+    assert client.get("/media/images/999").status_code == 404
+
+    client.post(f"/personas/images/{image['id']}", data={"description": "Mausi schläft"})
+    assert t.db.persona_image(image["id"])["description"] == "Mausi schläft"
+    client.post(f"/personas/images/{image['id']}/delete")
+    assert t.db.persona_images(1) == []
+    assert not (t.config.media_dir / image["filename"]).exists()
+
+
+def test_persona_image_auto_description(client):
+    t = engine(client)
+    t.db.set_setting("vision_model", "vision/model")
+    t.llm = FakeLLM(["Eine orange Fläche"])
+    client.post("/personas/1/images", files={"file": ("a.png", jpeg_bytes(), "image/png")})
+    assert t.db.persona_images(1)[0]["description"] == "Eine orange Fläche"
+
+
+def test_usage_page_and_limit_settings(client):
+    t = engine(client)
+    client.post("/settings", data={"daily_token_limit": "50000", "price_input_per_m": "0,15",
+                                   "price_output_per_m": "0.6", "vision_model": "v/m", "stt_model": "s/m",
+                                   "stt_backend": "whisper"})
+    s = t.db.settings()
+    assert s["daily_token_limit"] == 50000 and s["price_input_per_m"] == 0.15 and s["price_output_per_m"] == 0.6
+    assert s["vision_model"] == "v/m" and s["stt_backend"] == "whisper"
+    t.db.add_usage("openai/gpt-4o-mini", "reply", 1200, 800, 50, 0.0002)
+    page = client.get("/verbrauch").text
+    assert "Hochrechnung Monat" in page and "openai/gpt-4o-mini" in page and "1.250" in page
+    assert "50.000" in page  # Limit
+    assert "1.250 Token heute" in client.get("/").text

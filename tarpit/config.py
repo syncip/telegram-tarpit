@@ -27,6 +27,14 @@ class Config:
     notify_bot_token: str = ""
     notify_chat_id: str = ""
     public_url: str = ""
+    stt_base_url: str = ""
+    stt_api_key: str = ""
+
+    @property
+    def media_dir(self) -> Path:
+        path = self.data_dir / "media"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     @property
     def session_path(self) -> Path:
@@ -71,4 +79,6 @@ def load_config() -> Config:
         notify_bot_token=os.environ.get("NOTIFY_BOT_TOKEN", "").strip(),
         notify_chat_id=os.environ.get("NOTIFY_CHAT_ID", "").strip(),
         public_url=os.environ.get("PUBLIC_URL", "").strip(),
+        stt_base_url=os.environ.get("STT_BASE_URL", "").strip().rstrip("/"),
+        stt_api_key=os.environ.get("STT_API_KEY", "").strip(),
     )

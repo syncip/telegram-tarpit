@@ -5,14 +5,15 @@ from __future__ import annotations
 import logging
 import secrets
 import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import segno
-from fastapi import Depends, FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -31,9 +32,11 @@ from .analysis import STAGES, STAGES_SHORT, keyword_cloud, lexicon_counts, respo
 from .charts import daily_series, grouped_bars, hbars, hourly_series, tag_cloud, word_cloud
 from .prompts import WEEKDAYS
 from .referrals import Candidate
-from .db import BOOL_SETTINGS, INT_SETTINGS, MODES, REFERRAL_MODES, Database
+from .db import BOOL_SETTINGS, FLOAT_SETTINGS, INT_SETTINGS, MODES, REFERRAL_MODES, STT_BACKENDS, Database
 from .engine import Tarpit
 from .logs import SOURCES, DatabaseLogHandler
+from .media import MAX_UPLOAD_BYTES, prepare_upload
+from .usage import usage_report
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +101,7 @@ templates.env.filters["tsfull"] = _fmt_ts_full
 templates.env.filters["ago"] = _fmt_ago
 templates.env.filters["usd"] = lambda v: f"${v:.2f}" if v >= 1 else f"${v:.4f}" if v >= 0.01 else f"${v:.5f}"
 templates.env.globals["server_now"] = time.time
+templates.env.filters["num"] = lambda v: f"{int(v or 0):,}".replace(",", ".")
 templates.env.filters["duration"] = _fmt_duration
 
 
@@ -406,6 +410,7 @@ def create_app(config: Config) -> FastAPI:
                 "persona": d.persona_for_chat(chat),
                 "status": t.chat_status(chat_id),
                 "events": d.events(limit=15, chat_id=chat_id),
+                "sendable_images": list(t.sendable_images(chat_id).values()),
             },
         )
 
@@ -638,16 +643,74 @@ def create_app(config: Config) -> FastAPI:
                               "🔔 Test: So erreichen dich Benachrichtigungen." + t.notifier.link("/logs"))
         return back("/logs")
 
+    @app.get("/verbrauch", response_class=HTMLResponse)
+    async def usage_page(request: Request):
+        d = db(request)
+        return templates.TemplateResponse(request, "usage.html", usage_report(d, d.settings()))
+
     # --- Personas ----------------------------------------------------------
 
     @app.get("/personas", response_class=HTMLResponse)
-    async def personas_page(request: Request, edit: int | None = None):
+    async def personas_page(request: Request, edit: int | None = None, error: str = ""):
         d = db(request)
+        personas = d.personas()
         return templates.TemplateResponse(
             request,
             "personas.html",
-            {"personas": d.personas(), "editing": d.persona(edit) if edit else None},
+            {
+                "personas": personas,
+                "images": {p["id"]: d.persona_images(p["id"]) for p in personas},
+                "editing": d.persona(edit) if edit else None,
+                "vision_model": d.settings()["vision_model"],
+                "error": error,
+            },
         )
+
+    @app.post("/personas/{persona_id}/images")
+    async def persona_image_upload(
+        request: Request, persona_id: int, file: UploadFile = File(...), description: str = Form(""),
+    ):
+        d, t = db(request), tarpit(request)
+        if d.persona(persona_id) is None:
+            raise HTTPException(404, "Persona nicht gefunden")
+        data = await file.read(MAX_UPLOAD_BYTES + 1)
+        try:
+            jpeg = prepare_upload(data)
+        except ValueError as exc:
+            return back(f"/personas?error={quote(str(exc))}#persona-{persona_id}")
+        filename = f"{uuid.uuid4().hex}.jpg"
+        (config.media_dir / filename).write_bytes(jpeg)
+        description = description.strip()
+        if not description:
+            description = (await t.describe_persona_image(jpeg)) or ""
+        d.add_persona_image(persona_id, filename, description[:200])
+        log.info("Bild für Persona hochgeladen: %s", description or "(ohne Beschreibung)", extra={"source": "web"})
+        return back(f"/personas#persona-{persona_id}")
+
+    @app.post("/personas/images/{image_id}")
+    async def persona_image_update(request: Request, image_id: int, description: str = Form("")):
+        image = db(request).persona_image(image_id)
+        if image is None:
+            raise HTTPException(404, "Bild nicht gefunden")
+        db(request).update_persona_image(image_id, description.strip()[:200])
+        return back(f"/personas#persona-{image['persona_id']}")
+
+    @app.post("/personas/images/{image_id}/delete")
+    async def persona_image_delete(request: Request, image_id: int):
+        image = db(request).persona_image(image_id)
+        if image is None:
+            raise HTTPException(404, "Bild nicht gefunden")
+        db(request).delete_persona_image(image_id)
+        (config.media_dir / image["filename"]).unlink(missing_ok=True)
+        return back(f"/personas#persona-{image['persona_id']}")
+
+    @app.get("/media/images/{image_id}")
+    async def media_image(request: Request, image_id: int):
+        image = db(request).persona_image(image_id)
+        path = config.media_dir / image["filename"] if image else None
+        if path is None or not path.exists():
+            raise HTTPException(404, "Bild nicht gefunden")
+        return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
     @app.post("/personas")
     async def persona_save(
@@ -660,6 +723,8 @@ def create_app(config: Config) -> FastAPI:
 
     @app.post("/personas/{persona_id}/delete")
     async def persona_delete(request: Request, persona_id: int):
+        for image in db(request).persona_images(persona_id):
+            (config.media_dir / image["filename"]).unlink(missing_ok=True)
         db(request).delete_persona(persona_id)
         return back("/personas")
 
@@ -681,15 +746,24 @@ def create_app(config: Config) -> FastAPI:
         model = str(form.get("model", "")).strip()
         if model:
             d.set_setting("model", model)
-        d.set_setting("analysis_model", str(form.get("analysis_model", "")).strip())
+        for key in ("analysis_model", "vision_model", "stt_model"):
+            if key in form:
+                d.set_setting(key, str(form.get(key, "")).strip())
+        if form.get("stt_backend") in STT_BACKENDS:
+            d.set_setting("stt_backend", form.get("stt_backend"))
         current = d.settings()
         try:
-            temperature = float(str(form.get("temperature", current["temperature"])).replace(",", "."))
+            floats = {
+                key: float(str(form.get(key) or current[key]).replace(",", ".")) for key in FLOAT_SETTINGS
+            }
+            temperature = floats.pop("temperature")
             # fehlende Felder behalten ihren Wert
             ints = {key: int(str(form.get(key) or current[key])) for key in INT_SETTINGS}
         except ValueError:
             raise HTTPException(400, "Bitte nur Zahlen eintragen")
         d.set_setting("temperature", min(max(temperature, 0.0), 2.0))
+        for key, value in floats.items():
+            d.set_setting(key, max(0.0, value))
         for low, high in (("min_delay", "max_delay"), ("referral_min_delay", "referral_max_delay")):
             if ints[low] > ints[high]:
                 ints[low], ints[high] = ints[high], ints[low]

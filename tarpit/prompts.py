@@ -88,8 +88,22 @@ OPENING_TEMPLATE = """\
 kurz, freundlich, in deiner Rolle, erwähne dass {source} dich schickt. Keine Links, keine @-Namen."""
 
 
-def build_system_prompt(persona_prompt: str, background: str | None = None) -> str:
+IMAGES_TEMPLATE = """
+
+Fotos, die du schicken kannst, wenn es passt (z. B. wenn nach Bildern gefragt wird):
+schreib [BILD:nr] in eine eigene Zeile, ein kurzer Text dazu ist erlaubt. Jedes Foto nur einmal pro Chat,
+nicht jedes Mal eins schicken. Verfügbar:
+{images}
+"""
+
+
+def build_system_prompt(
+    persona_prompt: str, background: str | None = None, images: Iterable[tuple[int, str]] = (),
+) -> str:
     prompt = BASE_SYSTEM_PROMPT.format(persona=persona_prompt.strip())
+    image_lines = "\n".join(f"{image_id}: {description or 'Foto'}" for image_id, description in images)
+    if image_lines:
+        prompt += IMAGES_TEMPLATE.format(images=image_lines)
     if background and background.strip():
         prompt += BACKGROUND_TEMPLATE.format(background=background.strip())
     return prompt
@@ -107,9 +121,17 @@ def build_opening_messages(
     ]
 
 
-def build_context_note(now: datetime | None = None, instruction: str | None = None) -> str:
+def build_context_note(
+    now: datetime | None = None, instruction: str | None = None, sent_images: Iterable[int] = (),
+    photo_request: bool = False,
+) -> str:
     now = now or datetime.now()
     note = CONTEXT_TEMPLATE.format(now=f"{WEEKDAYS[now.weekday()]}, {now:%d.%m.%Y %H:%M}")
+    sent = sorted(sent_images)
+    if sent:
+        note += " Bereits geschickte Fotos (nicht nochmal): " + ", ".join(map(str, sent)) + "."
+    if photo_request:
+        note += " Er fragt nach einem Foto. Du kannst eins aus deiner Sammlung schicken oder dich herausreden."
     if instruction and instruction.strip():
         note += INSTRUCTION_TEMPLATE.format(instruction=instruction.strip())
     return note
@@ -118,6 +140,7 @@ def build_context_note(now: datetime | None = None, instruction: str | None = No
 def build_messages(
     persona_prompt: str, history: Iterable[Mapping], now: datetime | None = None,
     instruction: str | None = None, background: str | None = None,
+    images: Iterable[tuple[int, str]] = (), sent_images: Iterable[int] = (), photo_request: bool = False,
 ) -> list[dict[str, str]]:
     """Baut die Chat-Completion-Nachrichten aus dem gespeicherten Verlauf.
 
@@ -130,7 +153,7 @@ def build_messages(
     ggf. Regieanweisung.
     """
     messages: list[dict[str, str]] = [
-        {"role": "system", "content": build_system_prompt(persona_prompt, background)}
+        {"role": "system", "content": build_system_prompt(persona_prompt, background, images)}
     ]
     for msg in history:
         sender = msg["sender"]
@@ -141,5 +164,5 @@ def build_messages(
             messages[-1]["content"] += "\n" + msg["text"]
         else:
             messages.append({"role": role, "content": msg["text"]})
-    messages.append({"role": "system", "content": build_context_note(now, instruction)})
+    messages.append({"role": "system", "content": build_context_note(now, instruction, sent_images, photo_request)})
     return messages

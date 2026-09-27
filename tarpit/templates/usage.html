@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Verbrauch – Telegram Tarpit{% endblock %}
+{% block page %}usage{% endblock %}
+{% block content %}
+<h1>⛽ Verbrauch</h1>
+<p class="muted">Alle KI-Aufrufe: Antworten, Analysen, Bild- und Spracherkennung.
+  {% if not has_cost %}{% if prices_set %}Kosten sind aus deinen Preisen in den Einstellungen geschätzt.{% else %}Die API meldet keine Kosten. Trag in den Einstellungen Preise pro 1 Mio. Token ein, dann wird geschätzt.{% endif %}{% endif %}</p>
+
+<div class="stats">
+  <div class="stat"><span>{{ today_tokens | num }}</span>Tokens heute · {{ today_cost }}</div>
+  <div class="stat"><span>{{ mtd_tokens | num }}</span>Tokens diesen Monat ({{ month_name }}) · {{ mtd_cost }}</div>
+  <div class="stat" data-tip="{{ projection_basis }}, hochgerechnet auf {{ days_in_month }} Tage"><span>≈ {{ projection_tokens | num }}</span>Hochrechnung Monat · ≈ {{ projection_cost }}</div>
+  <div class="stat" data-tip="{{ projection_basis }}"><span>{{ avg_tokens | num }}</span>Ø Tokens pro Tag · {{ avg_cost }}</div>
+  <div class="stat"><span>{{ per_reply | num if per_reply else '–' }}</span>Ø Tokens pro KI-Antwort</div>
+  <div class="stat" data-tip="Anteil der Eingabe-Tokens, die der Anbieter aus dem Cache (günstiger) berechnet hat"><span>{{ cache_rate ~ ' %' if cache_rate is not none else '–' }}</span>Cache-Anteil</div>
+</div>
+
+<section class="card">
+  <div class="row between">
+    <strong>Tageslimit</strong>
+    <a class="small" href="/settings#limits">ändern</a>
+  </div>
+  {% if limit %}
+    <div class="meter-row" data-tip="{{ today_tokens | num }} von {{ limit | num }} Tokens">
+      <div class="meter"><div class="meter-fill {{ 'limit-hot' if limit_pct >= 90 }}" style="width: {{ limit_pct }}%"></div></div>
+      <span class="mono small">{{ today_tokens | num }} / {{ limit | num }} ({{ limit_pct }} %)</span>
+    </div>
+    <p class="muted small">Ist das Limit erreicht, pausiert die KI bis Mitternacht und du wirst benachrichtigt.</p>
+  {% else %}
+    <p class="muted">Kein Tageslimit gesetzt.</p>
+  {% endif %}
+</section>
+
+<section class="grid-2">
+  <div class="card">{{ chart_tokens | safe }}</div>
+  <div class="card">{{ chart_cost | safe }}</div>
+</section>
+
+<section class="grid-2">
+  <div class="card">
+    <h2 class="flush">Nach Zweck (diesen Monat)</h2>
+    <table class="kv">
+      {% for key, (name, css) in categories.items() %}
+        <tr><th><span class="swatch {{ css }}"></span> {{ name }}</th><td>{{ calls[key] }} Aufrufe</td></tr>
+      {% endfor %}
+      <tr><th>Eingabe-Tokens</th><td>{{ prompt | num }} (davon {{ cached | num }} aus dem Cache)</td></tr>
+      <tr><th>Ausgabe-Tokens</th><td>{{ completion | num }}</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <h2 class="flush">Nach Modell (diesen Monat)</h2>
+    <div class="table-wrap">
+    <table class="log">
+      <thead><tr><th>Modell</th><th>Aufrufe</th><th>Tokens</th><th>Kosten</th></tr></thead>
+      <tbody>
+      {% for m in models %}
+        <tr><td class="mono small">{{ m.model }}</td><td>{{ m.calls }}</td><td>{{ (m.prompt + m.completion) | num }}</td><td>{{ money(m.cost or 0) }}</td></tr>
+      {% else %}
+        <tr><td colspan="4" class="muted">Noch keine Aufrufe.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+</section>
+{% endblock %}

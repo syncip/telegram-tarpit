@@ -14,9 +14,9 @@
     <span class="dot"></span>
     <span><strong>{{ health.problems_24h }} Probleme</strong><br><span class="muted small">letzte 24 h</span></span>
   </a>
-  <a class="health-item" href="/logs?source=llm" data-ok="info">
+  <a class="health-item" href="/verbrauch" data-ok="{{ 'warn' if health.token_limit and health.tokens_today >= health.token_limit * 0.9 else 'info' }}">
     <span class="dot"></span>
-    <span><strong>{{ "{:,}".format(health.llm.tokens_today).replace(",", ".") }} Token heute</strong><br>
-      <span class="muted small">{{ health.llm.calls_today }} Aufrufe{% if health.llm.cost_today %} · {{ health.llm.cost_today | usd }}{% endif %}{% if health.llm.cache_rate is not none %} · {{ (health.llm.cache_rate * 100) | round | int }} % Cache{% endif %}</span></span>
+    <span><strong>{{ health.tokens_today | num }} Token heute</strong><br>
+      <span class="muted small">{% if health.token_limit %}Limit {{ health.token_limit | num }} · {% endif %}{{ health.llm.calls_today }} Aufrufe seit Start{% if health.llm.cache_rate is not none %} · {{ (health.llm.cache_rate * 100) | round | int }} % Cache{% endif %}</span></span>
   </a>
 </div>

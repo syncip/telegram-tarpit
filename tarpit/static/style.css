@@ -6,6 +6,8 @@
   --series-ai: #2a78d6; --series-them: #eb6834;
   --status-good: #0ca30c; --status-warning: #fab219; --status-critical: #d03b3b;
   --grid: #e9e8e4; --axis: #6b7280;
+  /* Kategorie-Palette Slots 1-5 (validiert, Hellmodus) */
+  --c1: #2a78d6; --c2: #eb6834; --c3: #1baf7a; --c4: #eda100; --c5: #e87ba4;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -13,6 +15,7 @@
     --them: #232a33; --ai: #14361f; --me: #172a4a; --note: #3a3413;
     --series-ai: #3987e5; --series-them: #d95926;
     --grid: #2b323c; --axis: #9aa3ae;
+    --c1: #3987e5; --c2: #d95926; --c3: #199e70; --c4: #c98500; --c5: #d55181;
   }
 }
 * { box-sizing: border-box; }
@@ -200,3 +203,22 @@ input, select, textarea, button { max-width: 100%; }
 .referrals { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-direction: column; gap: 8px; }
 .referrals li { padding-bottom: 6px; border-bottom: 1px solid var(--border); }
 .referrals li:last-child { border-bottom: 0; }
+
+/* --- Verbrauch & Bilder --------------------------------------------------------- */
+.s-c1 { fill: var(--c1); background: var(--c1); }
+.s-c2 { fill: var(--c2); background: var(--c2); }
+.s-c3 { fill: var(--c3); background: var(--c3); }
+.s-c4 { fill: var(--c4); background: var(--c4); }
+.s-c5 { fill: var(--c5); background: var(--c5); }
+.meter-fill.limit-hot { background: var(--status-critical); }
+.gallery { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.thumbs { display: flex; flex-wrap: wrap; gap: 8px; }
+.thumb { width: 140px; display: flex; flex-direction: column; gap: 4px; position: relative; }
+.thumb img { width: 100%; height: 100px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); }
+.thumb .chip { position: absolute; top: 4px; left: 4px; background: var(--panel); }
+.thumb input[type=text] { font-size: .8rem; }
+.thumb-bad img { opacity: .45; }
+.thumb-btn { padding: 0; border: 1px solid var(--border); border-radius: 6px; background: none; cursor: pointer; }
+.thumb-btn img { width: 44px; height: 44px; object-fit: cover; border-radius: 5px; display: block; }
+.upload input[type=file] { max-width: 220px; font-size: .85rem; }
+#draft-images:empty { display: none; }

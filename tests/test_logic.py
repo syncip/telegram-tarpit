@@ -1,13 +1,12 @@
 import random
-from datetime import datetime
+from datetime import date, datetime
 
-from datetime import date
+import pytest
 
-from tarpit.analysis import keyword_cloud, lexicon_counts, parse_analysis, response_times
+from tarpit.analysis import keyword_cloud, lexicon_counts, parse_analysis, response_times, word_counts
 from tarpit.charts import daily_series, grouped_bars, hbars, word_cloud
-from tarpit.analysis import word_counts
-from tarpit.referrals import extract_candidates
 from tarpit.prompts import build_messages
+from tarpit.referrals import extract_candidates
 from tarpit.safety import check_reply, clean_reply, split_reply
 from tarpit.timing import in_quiet_hours, postpone_quiet_hours, sample_delay, typing_duration, typing_plan
 
@@ -177,3 +176,56 @@ def test_word_counts_and_cloud():
     assert "w-them" in html and "w-ai" in html and "Rendite".lower() in html
     assert html.index("bitcoin") >= 0 and word_cloud([], "leer").endswith("leer</p>")
     assert word_cloud(counts, "x") == word_cloud(counts, "x")  # stabile Anordnung
+
+
+
+def test_prepare_upload_strips_metadata(tmp_path):
+    import io
+
+    from PIL import Image
+
+    from tarpit.media import prepare_upload
+
+    img = Image.new("RGB", (3000, 2000), "orange")
+    exif = Image.Exif()
+    exif[0x010F] = "Handyhersteller"          # Make
+    exif[0x8825] = {2: (52.0, 31.0, 12.0)}    # GPS-Info
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", exif=exif)
+    assert b"Handyhersteller" in buf.getvalue()
+
+    out = prepare_upload(buf.getvalue())
+    with Image.open(io.BytesIO(out)) as cleaned:
+        assert cleaned.format == "JPEG" and max(cleaned.size) == 1600
+        assert len(cleaned.getexif()) == 0
+    assert b"Handyhersteller" not in out
+    with pytest.raises(ValueError):
+        prepare_upload(b"kein bild")
+
+
+def test_image_markers_and_photo_request():
+    from tarpit.media import asks_for_photo, image_marker_ids, strip_image_markers
+
+    assert image_marker_ids("[BILD:3] hier\n[ bild : 12 ]") == [3, 12]
+    assert strip_image_markers("[BILD:3]  da ist sie") == "da ist sie"
+    assert asks_for_photo("Kannst du mir ein Foto schicken?") and asks_for_photo("send me a pic")
+    assert not asks_for_photo("Wie geht es dir?")
+
+
+def test_usage_report_projection(tmp_path):
+    from tarpit.db import Database
+    from tarpit.usage import usage_report
+
+    db = Database(tmp_path / "t.db")
+    today = date(2026, 9, 27)
+    for back in range(1, 8):  # letzte 7 Tage je 1000 Tokens und $0.01
+        ts = datetime(2026, 9, 27 - back, 12).timestamp()
+        db.add_usage("m", "reply", 800, 100, 200, 0.01, ts=ts)
+    db.add_usage("m", "analysis", 400, 0, 100, 0.005, ts=datetime(2026, 9, 27, 9).timestamp())
+    report = usage_report(db, db.settings(), today=today)
+    assert report["today_tokens"] == 500 and report["avg_tokens"] == 1000
+    # 26 Tage bis gestern ergeben hier 7000 + heute 500 + Rest von heute (500) + 3 Resttage * 1000
+    assert report["mtd_tokens"] == 7500 and report["projection_tokens"] == 7500 + 500 + 3000
+    assert report["calls"]["reply"] == 7 and report["calls"]["analysis"] == 1
+    assert report["per_reply"] == round((7 * 800 + 400 + 7 * 200 + 100) / 7)
+    assert "s-c1" in report["chart_tokens"] and "s-c2" in report["chart_tokens"]

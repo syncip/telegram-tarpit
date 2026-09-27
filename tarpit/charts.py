@@ -219,3 +219,81 @@ def word_cloud(counts: list[tuple[str, int, int]], empty: str, limit: int = 60, 
         f"<th>Scammer</th><th>Köder</th></tr></thead><tbody>{rows}</tbody></table></details>"
     )
     return f'{legend}<div class="wordcloud">{" ".join(words)}</div>{table}'
+
+
+def stacked_bars(
+    labels: list[str], series: list[Series], title: str, height: int = 220,
+    fmt=lambda v: f"{v:,}".replace(",", "."), axis_fmt=None,
+) -> str:
+    """Gestapelte Balken (z. B. Tokens pro Tag nach Zweck). 2px Flächenabstand zwischen Segmenten."""
+    width = 640
+    left, right, top, bottom = 52, 8, 10, 26
+    plot_w, plot_h = width - left - right, height - top - bottom
+    n = max(1, len(labels))
+    totals = [sum(s.values[i] for s in series) for i in range(n)]
+    ymax = _nice_max(max(totals, default=0))
+    group_w = plot_w / n
+    bar_w = max(3.0, min(26.0, group_w * 0.7))
+    gap = 2
+
+    parts = [
+        f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" '
+        f'aria-label="{html.escape(title)}" preserveAspectRatio="xMidYMid meet">'
+    ]
+    for i in range(5):
+        value = ymax * i / 4
+        y = top + plot_h - plot_h * i / 4
+        parts.append(f'<line class="grid" x1="{left}" x2="{width - right}" y1="{y:.1f}" y2="{y:.1f}"/>')
+        parts.append(f'<text class="axis" x="{left - 6}" y="{y + 4:.1f}" text-anchor="end">{html.escape((axis_fmt or _short)(value))}</text>')
+    label_every = max(1, math.ceil(n / 10))
+    for gi, label in enumerate(labels):
+        x = left + gi * group_w + (group_w - bar_w) / 2
+        y_cursor = top + plot_h
+        visible = [(s, s.values[gi]) for s in series if s.values[gi] > 0]
+        for k, (s, value) in enumerate(visible):
+            h = plot_h * value / ymax if ymax else 0
+            top_segment = k == len(visible) - 1
+            seg_h = max(0.0, h - (0 if top_segment else gap))
+            y = y_cursor - h
+            if top_segment:
+                parts.append(f'<path class="bar {s.css}" d="{_bar_path(x, y, bar_w, seg_h)}"/>')
+            elif seg_h > 0:
+                parts.append(f'<rect class="bar {s.css}" x="{x:.1f}" y="{y + gap:.1f}" width="{bar_w:.1f}" height="{seg_h:.1f}"/>')
+            y_cursor -= h
+        tip_rows = " · ".join(f"{s.name}: {fmt(s.values[gi])}" for s in series if s.values[gi])
+        tip = html.escape(f"{label} · Summe {fmt(totals[gi])}" + (f" · {tip_rows}" if tip_rows else ""))
+        parts.append(
+            f'<rect class="hit" x="{left + gi * group_w:.1f}" y="{top}" width="{group_w:.1f}" '
+            f'height="{plot_h}" data-tip="{tip}"/>'
+        )
+        if gi % label_every == 0:
+            cx = left + gi * group_w + group_w / 2
+            parts.append(f'<text class="axis" x="{cx:.1f}" y="{height - 8}" text-anchor="middle">{html.escape(label)}</text>')
+    parts.append(f'<line class="baseline" x1="{left}" x2="{width - right}" y1="{top + plot_h}" y2="{top + plot_h}"/>')
+    parts.append("</svg>")
+    legend = "".join(
+        f'<span class="legend-item"><span class="swatch {s.css}"></span>{html.escape(s.name)} '
+        f'<span class="muted">({fmt(sum(s.values))})</span></span>'
+        for s in series if sum(s.values)
+    ) or '<span class="muted">Noch keine Daten.</span>'
+    head = "".join(f"<th>{html.escape(s.name)}</th>" for s in series)
+    rows = "".join(
+        f"<tr><td>{html.escape(label)}</td>" + "".join(f"<td>{fmt(s.values[i])}</td>" for s in series)
+        + f"<td><strong>{fmt(totals[i])}</strong></td></tr>"
+        for i, label in enumerate(labels) if totals[i]
+    )
+    return (
+        f'<figure class="viz"><figcaption>{html.escape(title)}</figcaption><div class="legend">{legend}</div>'
+        f'{"".join(parts)}<details class="table-view"><summary>Als Tabelle</summary>'
+        f"<table><thead><tr><th></th>{head}<th>Summe</th></tr></thead><tbody>{rows}</tbody></table>"
+        f"</details></figure>"
+    )
+
+
+def _short(value: float) -> str:
+    """Kurze Achsenbeschriftung: 1200 -> 1,2k, 3500000 -> 3,5M."""
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M".replace(".0M", "M").replace(".", ",")
+    if value >= 1000:
+        return f"{value / 1000:.1f}k".replace(".0k", "k").replace(".", ",")
+    return f"{value:g}"

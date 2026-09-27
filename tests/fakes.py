@@ -32,6 +32,7 @@ class FakeClient:
         self.entities = {}      # Benutzername/ID -> User
         self.phone_users = {}   # Telefonnummer -> User
         self.imported = []
+        self.files = []
 
     async def send_read_acknowledge(self, chat_id):
         self.read.append(chat_id)
@@ -52,6 +53,14 @@ class FakeClient:
             user = self.phone_users.get(request.contacts[0].phone)
             return SimpleNamespace(users=[user] if user else [], imported=[])
         self.status_updates.append(request)
+
+    async def send_file(self, chat_id, file, caption=None, **kwargs):
+        self.files.append((chat_id, file, caption))
+        self._next_id += 1
+        return SimpleNamespace(id=self._next_id)
+
+    async def download_media(self, msg, file=None):
+        return b"fake-media-bytes"
 
     async def get_entity(self, target):
         if target in self.entities:
@@ -88,7 +97,8 @@ class FakeClient:
 class FakeLLM:
     """Gibt vorgegebene Antworten zurück; Analyse-Anfragen bekommen ein JSON."""
 
-    def __init__(self, replies=None):
+    def __init__(self, replies=None, cost=0.0001):
+        self.cost = cost
         self.replies = list(replies or [])
         self.default = "ach herrje, wie geht das denn?"
         self.calls = []
@@ -101,12 +111,16 @@ class FakeLLM:
             text = ANALYSIS_JSON
         else:
             text = self.replies.pop(0) if self.replies else self.default
-        usage = Usage(prompt=500, cached=300, completion=20, cost=0.0001)
+        usage = Usage(prompt=500, cached=300, completion=20, cost=self.cost)
         self.stats.ok(model, 5, usage)
         return ChatResult(text=text, usage=usage, latency_ms=5)
 
     async def chat(self, model, messages, temperature, max_tokens=None):
         return (await self.complete(model, messages, temperature, max_tokens)).text
+
+    async def transcribe(self, model, audio, filename="voice.ogg", base_url=None, api_key=None):
+        self.calls.append([{"role": "user", "content": "whisper"}])
+        return "hallo gerda, hier ist anna"
 
     async def aclose(self):
         pass

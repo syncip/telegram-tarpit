@@ -491,3 +491,98 @@ def test_analysis_history_is_kept(setup):
     run(lambda: t.maybe_analyze(CHAT, force=True))
     history = db.analysis_history(CHAT)
     assert len(history) == 2 and history[0]["messages"] == 2 and history[1]["messages"] == 1
+
+
+
+# --- Bilder, Bild-/Spracherkennung, Token-Limit ---------------------------------------
+
+def add_image(t, db, description="Katze Mausi auf dem Sofa"):
+    persona = db.persona_for_chat(db.chat(CHAT))
+    filename = f"img{len(db.persona_images(persona['id']))}.jpg"
+    (t.config.media_dir / filename).write_bytes(b"jpeg")
+    return db.add_persona_image(persona["id"], filename, description)
+
+
+def test_persona_image_is_offered_and_sent_once(setup):
+    t, db = setup
+    image_id = add_image(t, db)
+    t.llm = FakeLLM([f"[BILD:{image_id}]\nda ist mausi", f"[BILD:{image_id}]\nnochmal mausi"])
+    run(lambda: scammer_writes(t, db, "schick mir ein foto von dir"))
+    prompt = t.llm.reply_calls[0]
+    assert f"{image_id}: Katze Mausi" in prompt[0]["content"]  # im festen System-Prompt (Cache)
+    assert "fragt nach einem Foto" in prompt[-1]["content"]
+    assert t.client.files == [(CHAT, str(t.config.media_dir / "img0.jpg"), "da ist mausi")]
+    stored = db.messages(CHAT)[-1]
+    assert stored["image_id"] == image_id and stored["text"].startswith("[Bild: Katze Mausi")
+
+    run(lambda: scammer_writes(t, db, "noch ein bild bitte"))
+    assert len(t.client.files) == 1  # jedes Bild nur einmal
+    assert sent_texts(t)[-1] == "nochmal mausi"
+    assert f"Bereits geschickte Fotos (nicht nochmal): {image_id}" in t.llm.reply_calls[-1][-1]["content"]
+    assert t.chat_status(CHAT)["draft_images"] == []
+
+
+def test_draft_images_in_status(setup):
+    t, db = setup
+    image_id = add_image(t, db)
+    db.update_chat(CHAT, draft_text=f"[BILD:{image_id}] hier\n[BILD:999]")
+    images = t.chat_status(CHAT)["draft_images"]
+    assert images[0]["ok"] is True and images[0]["url"] == f"/media/images/{image_id}"
+    assert images[1]["ok"] is False
+
+
+def test_usage_is_recorded_with_purpose_and_estimated_cost(setup):
+    t, db = setup
+    t.llm = FakeLLM(cost=0.0)
+    db.set_setting("price_input_per_m", 1.0)
+    db.set_setting("price_output_per_m", 10.0)
+    run(lambda: scammer_writes(t, db))
+    rows = db.conn.execute("SELECT * FROM usage").fetchall()
+    assert rows[0]["purpose"] == "reply" and rows[0]["chat_id"] == CHAT
+    assert rows[0]["cost"] == pytest.approx((500 * 1 + 20 * 10) / 1_000_000)
+    assert t.tokens_today() == 520
+
+
+def test_daily_token_limit_stops_everything_and_notifies_once(setup):
+    t, db = setup
+    db.set_setting("daily_token_limit", 1000)
+    db.add_usage("x", "reply", 900, 0, 200, 0.0)
+    run(lambda: scammer_writes(t, db))
+    assert [c for c, _ in t.client.sent if c == CHAT] == []
+    assert t.llm.calls == []
+    assert any("Token-Tageslimit" in m["text"] for m in db.messages(CHAT) if m["sender"] == "note")
+    run(lambda: t.maybe_analyze(CHAT, force=True))
+    notes_to_me = [x for c, x in t.client.sent if c == "me"]
+    assert len(notes_to_me) == 1 and "Token-Tageslimit" in notes_to_me[0]
+
+
+def media_msg(**kind):
+    base = dict(photo=None, document=None, voice=None, audio=None, video_note=None, sticker=None,
+                message="guck mal", file=SimpleNamespace(mime_type=None))
+    base.update(kind)
+    return SimpleNamespace(**base)
+
+
+def test_vision_and_speech_recognition(setup):
+    t, db = setup
+    assert run_value(t._understand_media(CHAT, media_msg(photo=True))) is None  # aus = nichts
+    db.set_setting("vision_model", "vision/model")
+    db.set_setting("stt_model", "audio/model")
+    t.llm = FakeLLM(["Screenshot einer Krypto-App mit 50.000 USDT", "hallo gerda"])
+    text = run_value(t._understand_media(CHAT, media_msg(photo=True)))
+    assert text == "[Foto: Screenshot einer Krypto-App mit 50.000 USDT] guck mal"
+    vision_call = t.llm.calls[0][0]["content"]
+    assert vision_call[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    text = run_value(t._understand_media(CHAT, media_msg(voice=True, message="")))
+    assert text == "[Sprachnachricht: „hallo gerda“]"
+    assert t.llm.calls[1][0]["content"][1]["type"] == "input_audio"
+    db.set_setting("stt_backend", "whisper")
+    assert "hier ist anna" in run_value(t._understand_media(CHAT, media_msg(voice=True)))
+    purposes = [r["purpose"] for r in db.conn.execute("SELECT purpose FROM usage")]
+    assert purposes == ["vision", "stt", "stt"]
+    db.update_chat(CHAT, enabled=False)  # nur in KI-Chats (Kosten, Datenschutz)
+    assert run_value(t._understand_media(CHAT, media_msg(photo=True))) is None
+
+
+def run_value(coro):
+    return asyncio.run(coro)

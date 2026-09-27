@@ -77,6 +77,30 @@ CREATE TABLE IF NOT EXISTS analysis_history (
 );
 CREATE INDEX IF NOT EXISTS idx_analysis_history_chat ON analysis_history (chat_id, ts);
 
+-- Bilder, die eine Persona verschicken kann
+CREATE TABLE IF NOT EXISTS persona_images (
+    id          INTEGER PRIMARY KEY,
+    persona_id  INTEGER NOT NULL REFERENCES personas(id) ON DELETE CASCADE,
+    filename    TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_at  REAL NOT NULL
+);
+
+-- Jeder KI-Aufruf, für Tageslimit und Verbrauchsstatistik
+CREATE TABLE IF NOT EXISTS usage (
+    id          INTEGER PRIMARY KEY,
+    ts          REAL NOT NULL,
+    day         TEXT NOT NULL,
+    model       TEXT NOT NULL,
+    purpose     TEXT NOT NULL,   -- reply | analysis | vision | stt | other
+    chat_id     INTEGER,
+    prompt      INTEGER NOT NULL DEFAULT 0,
+    cached      INTEGER NOT NULL DEFAULT 0,
+    completion  INTEGER NOT NULL DEFAULT 0,
+    cost        REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_usage_day ON usage (day);
+
 -- Weiterleitungen: Scammer will, dass du jemand anderen anschreibst
 CREATE TABLE IF NOT EXISTS referrals (
     id              INTEGER PRIMARY KEY,
@@ -111,6 +135,7 @@ MIGRATIONS: dict[str, dict[str, str]] = {
     },
     "messages": {
         "edited": "INTEGER NOT NULL DEFAULT 0",
+        "image_id": "INTEGER",
     },
 }
 
@@ -135,6 +160,12 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "referral_min_delay": "120",
     "referral_max_delay": "900",
     "notify_enabled": "1",
+    "vision_model": "",           # leer = aus; z. B. ein bildfähiges Modell
+    "stt_model": "",              # leer = aus; Spracherkennung
+    "stt_backend": "chat",        # chat (Audio über die Chat-API) | whisper (/audio/transcriptions)
+    "daily_token_limit": "0",     # 0 = unbegrenzt; gilt für alle KI-Aufrufe zusammen
+    "price_input_per_m": "0",     # $ pro 1 Mio. Eingabe-Token, nur falls die API keine Kosten meldet
+    "price_output_per_m": "0",
     "analyze_every": "10",     # neue Nachrichten bis zur nächsten automatischen Analyse
 }
 
@@ -143,8 +174,10 @@ OLD_DEFAULTS_V1 = {"history_limit": "40", "analyze_every": "6"}
 INT_SETTINGS = {
     "min_delay", "max_delay", "daily_limit", "history_limit", "quiet_start", "quiet_end",
     "analyze_every", "max_reply_tokens", "referral_daily_limit", "referral_min_delay",
-    "referral_max_delay",
+    "referral_max_delay", "daily_token_limit",
 }
+FLOAT_SETTINGS = {"temperature", "price_input_per_m", "price_output_per_m"}
+STT_BACKENDS = ("chat", "whisper")
 BOOL_SETTINGS = {"global_enabled", "auto_analyze", "referral_pause_source", "notify_enabled"}
 REFERRAL_MODES = ("auto", "suggest", "off")
 
@@ -216,7 +249,8 @@ class Database:
             result[key] = int(result[key])
         for key in BOOL_SETTINGS:
             result[key] = result[key] == "1"
-        result["temperature"] = float(result["temperature"])
+        for key in FLOAT_SETTINGS:
+            result[key] = float(result[key])
         return result
 
     def set_setting(self, key: str, value: Any) -> None:
@@ -256,6 +290,36 @@ class Database:
                 "UPDATE personas SET name = ?, prompt = ? WHERE id = ?", (name, prompt, persona_id)
             )
             return persona_id
+
+    def persona_images(self, persona_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM persona_images WHERE persona_id = ? ORDER BY id", (persona_id,)
+        ).fetchall()
+
+    def persona_image(self, image_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM persona_images WHERE id = ?", (image_id,)).fetchone()
+
+    def add_persona_image(self, persona_id: int, filename: str, description: str) -> int:
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO persona_images (persona_id, filename, description, created_at) VALUES (?, ?, ?, ?)",
+                (persona_id, filename, description, time.time()),
+            )
+        return int(cur.lastrowid)
+
+    def update_persona_image(self, image_id: int, description: str) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE persona_images SET description = ? WHERE id = ?", (description, image_id))
+
+    def delete_persona_image(self, image_id: int) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM persona_images WHERE id = ?", (image_id,))
+
+    def sent_image_ids(self, chat_id: int) -> set[int]:
+        rows = self.conn.execute(
+            "SELECT DISTINCT image_id FROM messages WHERE chat_id = ? AND image_id IS NOT NULL", (chat_id,)
+        ).fetchall()
+        return {r[0] for r in rows}
 
     def delete_persona(self, persona_id: int) -> None:
         with self.conn:
@@ -448,15 +512,15 @@ class Database:
 
     def add_message(
         self, chat_id: int, sender: str, text: str, ts: float | None = None,
-        tg_msg_id: int | None = None, edited: bool = False,
+        tg_msg_id: int | None = None, edited: bool = False, image_id: int | None = None,
     ) -> bool:
         """Speichert eine Nachricht. Gibt False zurück, wenn sie schon existiert."""
         ts = time.time() if ts is None else ts
         with self.conn:
             cur = self.conn.execute(
-                "INSERT OR IGNORE INTO messages (chat_id, tg_msg_id, sender, text, ts, edited) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (chat_id, tg_msg_id, sender, text, ts, int(edited)),
+                "INSERT OR IGNORE INTO messages (chat_id, tg_msg_id, sender, text, ts, edited, image_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (chat_id, tg_msg_id, sender, text, ts, int(edited), image_id),
             )
             if cur.rowcount and sender != "note":
                 self.conn.execute(
@@ -556,6 +620,41 @@ class Database:
             (limit,),
         ).fetchall()
         return [r["text"] for r in rows]
+
+    # --- Verbrauch ---------------------------------------------------------
+
+    def add_usage(
+        self, model: str, purpose: str, prompt: int, cached: int, completion: int, cost: float,
+        chat_id: int | None = None, ts: float | None = None,
+    ) -> None:
+        ts = ts or time.time()
+        with self._lock, self.conn:
+            self.conn.execute(
+                "INSERT INTO usage (ts, day, model, purpose, chat_id, prompt, cached, completion, cost) "
+                "VALUES (?, date(?, 'unixepoch', 'localtime'), ?, ?, ?, ?, ?, ?, ?)",
+                (ts, ts, model, purpose, chat_id, prompt, cached, completion, cost),
+            )
+
+    def tokens_on(self, day: str) -> int:
+        return self.conn.execute(
+            "SELECT COALESCE(SUM(prompt + completion), 0) FROM usage WHERE day = ?", (day,)
+        ).fetchone()[0]
+
+    def usage_by_day(self, since_day: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """SELECT day, purpose, COUNT(*) AS calls, SUM(prompt) AS prompt, SUM(cached) AS cached,
+                      SUM(completion) AS completion, SUM(cost) AS cost
+               FROM usage WHERE day >= ? GROUP BY day, purpose ORDER BY day""",
+            (since_day,),
+        ).fetchall()
+
+    def usage_by_model(self, since_day: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """SELECT model, COUNT(*) AS calls, SUM(prompt) AS prompt, SUM(cached) AS cached,
+                      SUM(completion) AS completion, SUM(cost) AS cost
+               FROM usage WHERE day >= ? GROUP BY model ORDER BY SUM(prompt + completion) DESC""",
+            (since_day,),
+        ).fetchall()
 
     # --- Ereignis-Log ------------------------------------------------------
 

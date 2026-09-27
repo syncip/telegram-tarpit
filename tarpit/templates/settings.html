@@ -12,6 +12,26 @@
     <label>Max. Länge einer Antwort (Token) <input type="number" name="max_reply_tokens" value="{{ settings.max_reply_tokens }}"></label>
   </fieldset>
   <fieldset>
+    <legend>Bild- und Spracherkennung</legend>
+    <p class="muted small">Diese Modelle arbeiten dem Antwortmodell zu: Fotos und Sprachnachrichten des Scammers werden in Text umgewandelt, den die KI dann „sieht“. Leer = aus. Nur in Chats, die die KI übernommen hat.</p>
+    <label>Modell für Bilderkennung <input type="text" name="vision_model" value="{{ settings.vision_model }}" placeholder="z. B. ein bildfähiges Modell wie openai/gpt-4o-mini"></label>
+    <label>Modell für Spracherkennung <input type="text" name="stt_model" value="{{ settings.stt_model }}" placeholder="z. B. ein Modell mit Audio-Eingang oder whisper-1"></label>
+    <label>Art der Spracherkennung
+      <select name="stt_backend">
+        <option value="chat" {{ 'selected' if settings.stt_backend == 'chat' }}>Chat-API mit Audio (z. B. über OpenRouter)</option>
+        <option value="whisper" {{ 'selected' if settings.stt_backend == 'whisper' }}>Whisper-Endpunkt /audio/transcriptions (OpenAI, Groq, lokal)</option>
+      </select>
+    </label>
+    <p class="muted small">Für Whisper bei einem anderen Anbieter: <code>STT_BASE_URL</code> und <code>STT_API_KEY</code> in der <code>.env</code> setzen. Die Bilderkennung beschreibt auch automatisch hochgeladene Persona-Bilder.</p>
+  </fieldset>
+  <fieldset id="limits">
+    <legend>Token-Limit &amp; Kosten</legend>
+    <label>Tageslimit für alle KI-Aufrufe zusammen (Tokens, 0 = unbegrenzt) <input type="number" name="daily_token_limit" min="0" step="1000" value="{{ settings.daily_token_limit }}"></label>
+    <label>Preis Eingabe ($ pro 1 Mio. Token, nur zur Schätzung) <input type="text" name="price_input_per_m" value="{{ settings.price_input_per_m }}"></label>
+    <label>Preis Ausgabe ($ pro 1 Mio. Token) <input type="text" name="price_output_per_m" value="{{ settings.price_output_per_m }}"></label>
+    <p class="muted small">OpenRouter meldet die echten Kosten selbst. Die Preise werden nur verwendet, wenn die API keine Kosten liefert.</p>
+  </fieldset>
+  <fieldset>
     <legend>Analyse (Lage, Schlagworte, Best-of)</legend>
     <label class="check"><input type="checkbox" name="auto_analyze" value="1" {{ 'checked' if settings.auto_analyze }}> Automatisch analysieren</label>
     <label>Neu analysieren nach so vielen neuen Nachrichten <input type="number" name="analyze_every" min="1" value="{{ settings.analyze_every }}"></label>

@@ -115,6 +115,36 @@
       return ["idle", "Keine Antwort nötig: du oder die KI habt zuletzt geschrieben"];
     }
 
+    function renderDraftImages(images) {
+      const box = document.getElementById("draft-images");
+      if (!box) return;
+      const key = JSON.stringify(images);
+      if (box.dataset.key === key) return;
+      box.dataset.key = key;
+      box.innerHTML = "";
+      images.forEach((img) => {
+        const el = document.createElement("div");
+        el.className = "thumb" + (img.ok ? "" : " thumb-bad");
+        el.dataset.tip = img.ok ? "Wird mitgeschickt: " + img.description
+                                : "Wird NICHT geschickt (schon gesendet oder nicht vorhanden): " + img.description;
+        if (img.url) { const i = document.createElement("img"); i.src = img.url; i.alt = img.description; el.appendChild(i); }
+        const label = document.createElement("span");
+        label.className = "chip small";
+        label.textContent = (img.ok ? "📷 #" : "⚠️ #") + img.id;
+        el.appendChild(label);
+        box.appendChild(el);
+      });
+    }
+    document.querySelectorAll("[data-insert-image]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (!draft) return;
+        const marker = "[BILD:" + btn.dataset.insertImage + "]";
+        draft.value = (draft.value.trim() ? draft.value.trim() + "\n" : "") + marker;
+        draftDirty = true;
+        draft.focus();
+      });
+    });
+
     async function poll() {
       try {
         const s = await getJSON("/chats/" + chatId + "/status");
@@ -130,6 +160,7 @@
         if (stale) stale.hidden = !(s.draft_text && s.draft_stale);
         const edited = document.getElementById("draft-edited");
         if (edited) edited.hidden = !s.draft_edited;
+        renderDraftImages(s.draft_images || []);
         const gen = document.getElementById("draft-generating");
         if (gen) gen.hidden = !s.generating;
         // Entwurf nur aktualisieren, wenn du ihn gerade nicht bearbeitest

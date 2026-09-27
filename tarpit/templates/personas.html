@@ -4,6 +4,9 @@
 <h1>Personas</h1>
 <p class="muted">Die erste Persona ist der Standard für Chats ohne eigene Zuweisung. Die Regeln (nie Daten herausgeben, keine Links, nie als KI outen) gelten immer zusätzlich.</p>
 
+{% if error %}<p class="banner">{{ error }}</p>{% endif %}
+<p class="muted small">📷 <strong>Bilder:</strong> Die KI kann diese Fotos schicken, wenn der Scammer nach Bildern fragt (jedes höchstens einmal pro Chat). Nimm nur eigene oder harmlose Bilder, zum Beispiel Katze, Garten, ein verwackeltes Foto, <strong>keine Fotos anderer echter Menschen</strong>. Beim Hochladen werden Metadaten wie der GPS-Standort automatisch entfernt.</p>
+
 <div class="cards">
 {% for p in personas %}
   <article class="card">
@@ -17,6 +20,29 @@
       </span>
     </header>
     <pre>{{ p.prompt }}</pre>
+    <div class="gallery" id="persona-{{ p.id }}">
+      <strong class="small">📷 Bilder ({{ images[p.id] | length }})</strong>
+      <div class="thumbs">
+        {% for img in images[p.id] %}
+        <div class="thumb">
+          <img src="/media/images/{{ img.id }}" alt="{{ img.description }}" loading="lazy">
+          <span class="chip small">#{{ img.id }}</span>
+          <form method="post" action="/personas/images/{{ img.id }}" class="stack">
+            <input type="text" name="description" value="{{ img.description }}" placeholder="Beschreibung" aria-label="Beschreibung">
+            <div class="row">
+              <button class="btn small">Speichern</button>
+              <button class="btn small danger" formaction="/personas/images/{{ img.id }}/delete" onclick="return confirm('Bild löschen?')">Löschen</button>
+            </div>
+          </form>
+        </div>
+        {% endfor %}
+      </div>
+      <form method="post" action="/personas/{{ p.id }}/images" enctype="multipart/form-data" class="row upload">
+        <input type="file" name="file" accept="image/*" required>
+        <input type="text" name="description" class="grow" placeholder="{{ 'Beschreibung (leer = automatisch per Bilderkennung)' if vision_model else 'Beschreibung, z. B. „meine Katze Mausi auf dem Sofa“' }}">
+        <button class="btn">Hochladen</button>
+      </form>
+    </div>
   </article>
 {% endfor %}
 </div>

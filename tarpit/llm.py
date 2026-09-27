@@ -125,7 +125,7 @@ class LLMClient:
         return (await self.complete(model, messages, temperature, max_tokens)).text
 
     async def complete(
-        self, model: str, messages: list[dict[str, str]], temperature: float,
+        self, model: str, messages: list[dict], temperature: float,
         max_tokens: int | None = None,
     ) -> ChatResult:
         payload: dict = {
@@ -161,6 +161,32 @@ class LLMClient:
         usage = Usage.from_response(data.get("usage"))
         self.stats.ok(model, latency_ms, usage)
         return ChatResult(text=content or "", usage=usage, latency_ms=latency_ms)
+
+    async def transcribe(
+        self, model: str, audio: bytes, filename: str = "voice.ogg",
+        base_url: str | None = None, api_key: str | None = None,
+    ) -> str:
+        """Spracherkennung über einen Whisper-kompatiblen Endpunkt (/audio/transcriptions)."""
+        url = (base_url or self.base_url).rstrip("/") + "/audio/transcriptions"
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        try:
+            response = await self._http.post(
+                url, headers=headers, data={"model": model}, files={"file": (filename, audio)},
+            )
+        except httpx.HTTPError as exc:
+            message = f"Spracherkennung nicht erreichbar ({url}): {type(exc).__name__} {exc}"
+            self.stats.error(message)
+            raise LLMError(message) from exc
+        if response.status_code >= 400:
+            message = f"Spracherkennung antwortet mit {response.status_code}: {response.text[:300]}"
+            self.stats.error(message)
+            raise LLMError(message)
+        try:
+            return str(response.json()["text"])
+        except (KeyError, ValueError) as exc:
+            message = f"Unerwartete Antwort der Spracherkennung: {response.text[:300]}"
+            self.stats.error(message)
+            raise LLMError(message) from exc
 
     async def aclose(self) -> None:
         await self._http.aclose()
