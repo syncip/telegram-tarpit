@@ -20,6 +20,11 @@ class FakeTarpit:
         self.me = SimpleNamespace(first_name="Ich", username="ich")
         self.sent = []
         self.authorized = True
+        self.login_phone = ""
+        self.login_code_hint = None
+        self.login_resend_hint = None
+        self.qr_url = None
+        self.qr_state = None
 
     async def start(self):
         self.db.upsert_chat(1, "Herr Scam", "scam", time.time())
@@ -52,6 +57,17 @@ class FakeTarpit:
     async def request_login_code(self, phone):
         if phone != "+491234":
             raise PhoneNumberInvalidError(request=None)
+        self.login_phone = phone
+        self.login_code_hint = "per SMS"
+        self.login_resend_hint = "per Anruf"
+
+    async def start_qr_login(self):
+        self.qr_url = "tg://login?token=abc"
+        self.qr_state = "waiting"
+
+    def cancel_qr_login(self):
+        self.qr_url = None
+        self.qr_state = None
 
     async def submit_login_code(self, code):
         if code != "12345":
@@ -125,7 +141,9 @@ def test_telegram_login_flow(client):
 
     r = client.post("/login/phone", data={"phone": "+49 999"})
     assert r.status_code == 400 and "Ungültige Telefonnummer" in r.text
-    assert "Login-Code" in client.post("/login/phone", data={"phone": "+49 1234"}).text
+    r = client.post("/login/phone", data={"phone": "+49 1234"})
+    assert "Login-Code" in r.text and "per SMS" in r.text and "erneut senden (per Anruf)" in r.text
+    assert "per SMS" in client.post("/login/resend").text
 
     r = client.post("/login/code", data={"code": "000"})
     assert r.status_code == 400 and "falsch" in r.text
@@ -134,3 +152,14 @@ def test_telegram_login_flow(client):
     r = client.post("/login/password", data={"password": "pw"}, follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"] == "/"
     assert client.get("/").status_code == 200
+
+
+def test_qr_login_flow(client):
+    client.post("/logout")
+    assert client.get("/login/qr", follow_redirects=False).headers["location"] == "/login"
+    r = client.post("/login/qr")
+    assert r.status_code == 200 and "<svg" in r.text and "Desktop-Gerät verbinden" in r.text
+    client.app.state.tarpit.qr_state = "password"
+    assert "Zwei-Schritt-Passwort" in client.get("/login/qr").text
+    client.post("/login/password", data={"password": "pw"})
+    assert client.get("/login/qr", follow_redirects=False).headers["location"] == "/"

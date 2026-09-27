@@ -106,3 +106,50 @@ def test_no_reply_when_disabled_or_last_message_is_ours(setup):
     db.add_message(7, "me", "hab selbst geantwortet")
     run(t, ["x"])
     assert t.llm.calls == 0
+
+
+def test_describe_code_type():
+    from telethon.tl.types.auth import SentCodeTypeApp, SentCodeTypeEmailCode, SentCodeTypeSms
+
+    assert "Telegram-App" in engine_mod.describe_code_type(SentCodeTypeApp(length=5))
+    assert engine_mod.describe_code_type(SentCodeTypeSms(length=5)) == "per SMS"
+    assert "m***@x.de" in engine_mod.describe_code_type(
+        SentCodeTypeEmailCode(email_pattern="m***@x.de", length=6)
+    )
+
+
+class FakeQR:
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.recreated = 0
+        self.url = "tg://login?token=x"
+
+    async def wait(self):
+        outcome = self.outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+
+    async def recreate(self):
+        self.recreated += 1
+
+
+def test_qr_loop_renews_token_and_logs_in(setup, monkeypatch):
+    t, _ = setup
+    logged_in = []
+
+    async def fake_after_login():
+        logged_in.append(True)
+
+    monkeypatch.setattr(t, "_after_login", fake_after_login)
+    t._qr = FakeQR([asyncio.TimeoutError(), asyncio.TimeoutError(), None])
+    asyncio.run(t._qr_loop())
+    assert t._qr.recreated == 2 and t.qr_state == "done" and logged_in
+
+
+def test_qr_loop_needs_password(setup):
+    from telethon.errors import SessionPasswordNeededError
+
+    t, _ = setup
+    t._qr = FakeQR([SessionPasswordNeededError(request=None)])
+    asyncio.run(t._qr_loop())
+    assert t.qr_state == "password"

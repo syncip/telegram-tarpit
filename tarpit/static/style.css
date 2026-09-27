@@ -66,3 +66,5 @@ code { background: var(--bg); padding: 1px 4px; border-radius: 4px; }
   table.chats th:nth-child(6), table.chats td:nth-child(6) { display: none; }
   .msg { max-width: 90%; }
 }
+.qr { background: #fff; display: inline-block; padding: 8px; border-radius: 10px; margin: 8px 0; }
+h2 { font-size: 1.1rem; margin: 20px 0 6px; }

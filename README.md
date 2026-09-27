@@ -31,8 +31,15 @@ docker compose up -d --build
 ```
 
 Das Webinterface läuft dann auf <http://127.0.0.1:8080>, mit Benutzer und Passwort aus der `.env`.
-Beim ersten Aufruf erscheint die **Telegram-Anmeldung**: Telefonnummer eingeben, dann den Code aus der
-Telegram-App und ggf. dein Zwei-Schritt-Passwort. Die Session bleibt danach in `./data/` gespeichert.
+Beim ersten Aufruf erscheint die **Telegram-Anmeldung**, mit zwei Varianten:
+
+- **QR-Code (empfohlen):** In der Telegram-App auf dem Handy *Einstellungen → Geräte → Desktop-Gerät verbinden*
+  öffnen und den angezeigten QR-Code scannen.
+- **Telefonnummer + Code:** Die Seite zeigt an, wohin Telegram den Code geschickt hat. Meist kommt er **nicht per
+  SMS**, sondern als Nachricht vom Konto „Telegram“ in die App auf einem Gerät, auf dem du schon angemeldet bist.
+  Über „Code erneut senden“ lässt sich oft auf SMS oder Anruf wechseln.
+
+Danach wird ggf. dein Zwei-Schritt-Passwort abgefragt. Die Session bleibt in `./data/` gespeichert.
 
 ### Ohne Docker
 

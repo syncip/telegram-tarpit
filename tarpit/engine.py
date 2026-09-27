@@ -54,6 +54,35 @@ def describe_message(msg: Message) -> str:
     return " ".join(parts) or "[Nachricht ohne Text]"
 
 
+_CODE_TYPES = {
+    "SentCodeTypeApp": "als Nachricht vom Konto „Telegram“ in deine Telegram-App, und zwar auf einem "
+    "anderen Gerät, auf dem du schon angemeldet bist (nicht per SMS!)",
+    "SentCodeTypeSms": "per SMS",
+    "SentCodeTypeFirebaseSms": "per SMS",
+    "SentCodeTypeSmsWord": "per SMS (als Wort)",
+    "SentCodeTypeSmsPhrase": "per SMS (als Satz)",
+    "SentCodeTypeCall": "per Anruf",
+    "SentCodeTypeFlashCall": "per verpasstem Anruf (der Code steckt in der anrufenden Nummer)",
+    "SentCodeTypeMissedCall": "per verpasstem Anruf (der Code sind die letzten Ziffern der anrufenden Nummer)",
+    "SentCodeTypeFragmentSms": "über Fragment (fragment.com)",
+    "CodeTypeSms": "per SMS",
+    "CodeTypeCall": "per Anruf",
+    "CodeTypeFlashCall": "per verpasstem Anruf",
+    "CodeTypeMissedCall": "per verpasstem Anruf",
+    "CodeTypeFragmentSms": "über Fragment (fragment.com)",
+}
+
+
+def describe_code_type(code_type) -> str:
+    name = type(code_type).__name__
+    if name == "SentCodeTypeEmailCode":
+        return f"per E-Mail an {code_type.email_pattern}"
+    if name == "SentCodeTypeSetUpEmailRequired":
+        return ("gar nicht: Telegram verlangt für diese Anmeldung eine Login-E-Mail. "
+                "Bitte stattdessen den QR-Code-Login verwenden")
+    return _CODE_TYPES.get(name, f"auf unbekanntem Weg ({name})")
+
+
 class Tarpit:
     def __init__(self, config: Config, db: Database):
         self.config = config
@@ -65,6 +94,12 @@ class Tarpit:
         self.rng = random.Random()
         self._login_phone = ""
         self._login_hash = ""
+        self.login_code_hint: str | None = None
+        self.login_resend_hint: str | None = None
+        self._qr = None
+        self._qr_task: asyncio.Task | None = None
+        self.qr_state: str | None = None  # waiting | password | error | done
+        self.qr_error: str | None = None
 
     # --- Lebenszyklus ------------------------------------------------------
 
@@ -102,9 +137,18 @@ class Tarpit:
     # --- Login über das Webinterface ---------------------------------------
 
     async def request_login_code(self, phone: str) -> None:
+        """Fordert einen Login-Code an. Mit derselben Nummer erneut aufgerufen,
+        schickt Telegram den Code nochmal, oft auf anderem Weg (z. B. SMS)."""
         sent = await self.client.send_code_request(phone)
         self._login_phone = phone
-        self._login_hash = sent.phone_code_hash
+        self._login_hash = sent.phone_code_hash or self._login_hash
+        self.login_code_hint = describe_code_type(sent.type)
+        next_type = getattr(sent, "next_type", None)
+        self.login_resend_hint = describe_code_type(next_type) if next_type else None
+
+    @property
+    def login_phone(self) -> str:
+        return self._login_phone
 
     async def submit_login_code(self, code: str) -> bool:
         """Gibt False zurück, wenn zusätzlich das 2FA-Passwort nötig ist."""
@@ -121,6 +165,46 @@ class Tarpit:
         await self.client.sign_in(password=password)
         await self._after_login()
 
+    # --- Login per QR-Code ---------------------------------------------------
+
+    async def start_qr_login(self) -> None:
+        self.cancel_qr_login()
+        self._qr = await self.client.qr_login()
+        self.qr_state = "waiting"
+        self.qr_error = None
+        self._qr_task = asyncio.create_task(self._qr_loop())
+
+    def cancel_qr_login(self) -> None:
+        if self._qr_task is not None:
+            self._qr_task.cancel()
+        self._qr_task = None
+        self._qr = None
+        self.qr_state = None
+
+    @property
+    def qr_url(self) -> str | None:
+        return self._qr.url if self._qr is not None else None
+
+    async def _qr_loop(self) -> None:
+        # Der Token im QR-Code läuft nach ca. 30 Sekunden ab und wird dann erneuert.
+        while True:
+            try:
+                await self._qr.wait()
+            except asyncio.TimeoutError:
+                await self._qr.recreate()
+                continue
+            except SessionPasswordNeededError:
+                self.qr_state = "password"
+                return
+            except Exception as exc:
+                log.exception("QR-Login fehlgeschlagen")
+                self.qr_state = "error"
+                self.qr_error = str(exc)
+                return
+            self.qr_state = "done"
+            await self._after_login()
+            return
+
     async def logout(self) -> None:
         self.cancel_all()
         await self.client.log_out()
@@ -129,6 +213,7 @@ class Tarpit:
         await self.client.connect()
 
     async def stop(self) -> None:
+        self.cancel_qr_login()
         for pending in list(self.pending.values()):
             pending.task.cancel()
         self.pending.clear()

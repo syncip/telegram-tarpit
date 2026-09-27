@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+import segno
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -139,14 +140,21 @@ def create_app(config: Config) -> FastAPI:
     # --- Telegram-Login ----------------------------------------------------
 
     def login_page(request: Request, step: str, error: str | None = None, status: int = 200):
-        return templates.TemplateResponse(
-            request, "login.html", {"step": step, "error": error}, status_code=status
-        )
+        t = tarpit(request)
+        context = {
+            "step": step,
+            "error": error,
+            "phone": t.login_phone,
+            "code_hint": t.login_code_hint,
+            "resend_hint": t.login_resend_hint,
+        }
+        return templates.TemplateResponse(request, "login.html", context, status_code=status)
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_get(request: Request):
         if tarpit(request).authorized:
             return back("/")
+        tarpit(request).cancel_qr_login()
         return login_page(request, "phone")
 
     @app.post("/login/phone")
@@ -157,6 +165,39 @@ def create_app(config: Config) -> FastAPI:
         except (RPCError, ValueError) as exc:
             return login_page(request, "phone", _login_error(exc), 400)
         return login_page(request, "code")
+
+    @app.post("/login/resend")
+    async def login_resend(request: Request):
+        t = tarpit(request)
+        if not t.login_phone:
+            return back("/login")
+        try:
+            await t.request_login_code(t.login_phone)
+        except (RPCError, ValueError) as exc:
+            return login_page(request, "code", _login_error(exc), 400)
+        return login_page(request, "code")
+
+    @app.post("/login/qr")
+    async def login_qr_start(request: Request):
+        try:
+            await tarpit(request).start_qr_login()
+        except RPCError as exc:
+            return login_page(request, "phone", _login_error(exc), 400)
+        return back("/login/qr")
+
+    @app.get("/login/qr", response_class=HTMLResponse)
+    async def login_qr(request: Request):
+        t = tarpit(request)
+        if t.authorized:
+            return back("/")
+        if t.qr_state == "password":
+            return login_page(request, "password")
+        if t.qr_state == "error":
+            return login_page(request, "phone", f"QR-Login fehlgeschlagen: {t.qr_error}", 400)
+        if t.qr_url is None:
+            return back("/login")
+        svg = segno.make(t.qr_url, error="l").svg_inline(scale=6, border=2, dark="#000", light="#fff")
+        return templates.TemplateResponse(request, "login_qr.html", {"qr_svg": svg})
 
     @app.post("/login/code")
     async def login_code(request: Request, code: str = Form(...)):

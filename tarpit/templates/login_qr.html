@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}QR-Login – Telegram Tarpit{% endblock %}
+{% block content %}
+<meta http-equiv="refresh" content="3">
+<div class="narrow">
+  <h1>Mit QR-Code anmelden</h1>
+  <ol>
+    <li>Telegram auf dem Handy öffnen.</li>
+    <li><strong>Einstellungen → Geräte → Desktop-Gerät verbinden</strong> (bzw. „Gerät verbinden“).</li>
+    <li>Diesen QR-Code scannen.</li>
+  </ol>
+  <div class="qr">{{ qr_svg | safe }}</div>
+  <p class="muted small">Der Code erneuert sich automatisch alle ~30 Sekunden, die Seite lädt sich selbst neu.
+    Hast du ein Zwei-Schritt-Passwort, wirst du nach dem Scannen danach gefragt.</p>
+  <p><a href="/login">Zurück zur Anmeldung per Telefonnummer</a></p>
+</div>
+{% endblock %}
